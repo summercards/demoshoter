@@ -1,0 +1,251 @@
+class_name ExtractionBeacon3D
+extends Area3D
+
+signal extraction_started(duration: float)
+signal extraction_progress(progress: float)
+signal extraction_cancelled
+signal extraction_completed
+
+@export var accent_color := Color(0.32, 0.88, 1.0)
+@export_range(1.0, 10.0, 0.25) var duration := 4.0
+@export var beacon_type := "BOSS_KILL"
+
+var locked := true
+var _player_in_range := false
+var _active := false
+var _remaining := 0.0
+var _prompt: Label3D
+var _light: OmniLight3D
+
+
+func configure(color: Color, p_duration: float, p_beacon_type := "BOSS_KILL") -> void:
+	accent_color = color
+	duration = p_duration
+	beacon_type = p_beacon_type
+
+
+func _ready() -> void:
+	add_to_group("extraction_beacon_3d")
+	add_to_group(PlayerInteractionController3D.PROVIDER_GROUP)
+	collision_layer = 0
+	collision_mask = 1
+	body_entered.connect(_on_body_entered)
+	body_exited.connect(_on_body_exited)
+	_build_visual()
+	_refresh_prompt()
+
+
+func _process(delta: float) -> void:
+	rotation.y += delta * 0.36
+	if _light != null:
+		# 待机信标不能周期性改写基地地板亮度，否则玩家操作独立的房灯
+		# 开关后会误以为房灯没有恢复。只在真正撤离同步时保留能量脉冲。
+		_light.light_energy = (
+			2.2 + sin(Time.get_ticks_msec() * 0.004) * 0.35
+			if _active
+			else 2.2
+		)
+	if not _active:
+		return
+	# 自由撤离：玩家可以离开 beacon 范围（可以逃跑、拖怪），不能被中断。
+	_remaining = maxf(0.0, _remaining - delta)
+	extraction_progress.emit(1.0 - _remaining / maxf(0.01, duration))
+	_prompt.text = "撤离同步 %.1fs" % _remaining
+	if _remaining <= 0.0:
+		_active = false
+		extraction_completed.emit()
+
+
+func get_interaction_candidate(_player: Player3D) -> Dictionary:
+	if not _player_in_range or _active:
+		return {}
+	return {
+		"available": true,
+		"interaction_id": "extraction_beacon:%d" % get_instance_id(),
+		"position": global_position,
+		"priority": 100,
+		"prompt": _prompt.text if _prompt != null else "[E] 启动撤离",
+	}
+
+
+## 文字提示牌退役为纯文案载体；可见反馈由常驻圆点承担。
+func set_interaction_focus(_candidate: Dictionary, _focused: bool) -> void:
+	pass
+
+
+func get_interaction_dot_anchor() -> Vector3:
+	if _prompt != null and is_instance_valid(_prompt):
+		return _prompt.global_position
+	return global_position + Vector3.UP * 2.75
+
+
+## 撤离同步进行中（或已锁定不可用时）不显示圆点。
+func is_interaction_dot_visible() -> bool:
+	return not _active
+
+
+
+func perform_interaction(_player: Player3D, _candidate: Dictionary) -> bool:
+	if not _player_in_range or _active:
+		return false
+	if locked:
+		_prompt.text = "Boss 信号仍在干扰"
+		return true
+	_active = true
+	_remaining = duration
+	extraction_started.emit(duration)
+	return true
+
+
+func set_locked(value: bool) -> void:
+	locked = value
+	if value and _active:
+		_cancel()
+	_refresh_prompt()
+
+
+func force_complete_for_test() -> void:
+	if locked:
+		return
+	extraction_completed.emit()
+
+
+func force_start_for_test() -> bool:
+	if locked or _active:
+		return false
+	_player_in_range = true
+	_active = true
+	_remaining = duration
+	extraction_started.emit(duration)
+	return true
+
+
+func abort_extraction() -> void:
+	if _active:
+		_cancel()
+
+
+func apply_fate_time_multiplier(multiplier: float) -> void:
+	duration *= multiplier
+	if _active:
+		_remaining *= multiplier
+
+
+func is_in_active_sync_area(world_position: Vector3) -> bool:
+	if not _active:
+		return false
+	var local := to_local(world_position)
+	return Vector2(local.x, local.z).length() <= 2.0 and local.y >= -0.25 and local.y <= 2.25
+
+
+func get_snapshot() -> Dictionary:
+	return {
+		"type": beacon_type, "locked": locked, "active": _active,
+		"remaining": _remaining, "duration": duration, "player_in_range": _player_in_range,
+		"idle_light_stable": not _active,
+		"light_energy": _light.light_energy if _light != null else 0.0,
+	}
+
+
+func _cancel() -> void:
+	_active = false
+	_remaining = 0.0
+	_refresh_prompt()
+	extraction_cancelled.emit()
+
+
+func _on_body_entered(body: Node3D) -> void:
+	if body.is_in_group("player_3d"):
+		_player_in_range = true
+		_refresh_prompt()
+
+
+func _on_body_exited(body: Node3D) -> void:
+	if body.is_in_group("player_3d"):
+		_player_in_range = false
+		_prompt.visible = false
+
+
+func _refresh_prompt() -> void:
+	if _prompt == null:
+		return
+	var type_name: String = {
+		"STANDARD": "固定", "ELITE_KILL": "精英", "BOSS_KILL": "Boss",
+		"BEACON": "信标", "TRADE": "交易",
+	}.get(beacon_type, "未知")
+	_prompt.text = "%s撤离未解锁" % type_name if locked else "[E] 启动%s撤离" % type_name
+
+
+func _build_visual() -> void:
+	var metal := _material(Color(0.07, 0.10, 0.11), 0.74, 0.36)
+	var glow := _material(accent_color, 0.16, 0.22, true)
+	_add_cylinder("Base", Vector3(0, 0.18, 0), 1.1, 0.34, metal)
+	_add_cylinder("Core", Vector3(0, 1.15, 0), 0.28, 2.0, glow)
+	for index in range(3):
+		var ring := _add_torus("Ring", Vector3(0, 0.65 + index * 0.55, 0), 0.52 + index * 0.12, 0.07, glow)
+		ring.rotation_degrees.x = 90.0 if index % 2 == 0 else 0.0
+	_light = OmniLight3D.new()
+	_light.position = Vector3(0, 1.5, 0)
+	_light.light_color = accent_color
+	_light.omni_range = 7.0
+	_light.light_energy = 2.4
+	add_child(_light)
+	_light.add_to_group(EnemyIllumination3D.LOCAL_LIGHT_GROUP)
+	_light.set_meta("gameplay_light_kind", "omni")
+	var shape := CylinderShape3D.new()
+	shape.radius = 2.0
+	shape.height = 2.5
+	var collision := CollisionShape3D.new()
+	collision.position.y = 1.0
+	collision.shape = shape
+	add_child(collision)
+	_prompt = Label3D.new()
+	_prompt.position = Vector3(0, 2.75, 0)
+	_prompt.font_size = 42
+	_prompt.pixel_size = 0.012
+	_prompt.modulate = accent_color.lightened(0.18)
+	_prompt.outline_size = 9
+	_prompt.visible = false
+	add_child(_prompt)
+
+
+func _add_cylinder(node_name: String, position: Vector3, radius: float, height: float, material: StandardMaterial3D) -> MeshInstance3D:
+	var mesh := CylinderMesh.new()
+	mesh.top_radius = radius
+	mesh.bottom_radius = radius
+	mesh.height = height
+	mesh.radial_segments = 20
+	mesh.material = material
+	var instance := MeshInstance3D.new()
+	instance.name = node_name
+	instance.position = position
+	instance.mesh = mesh
+	add_child(instance)
+	return instance
+
+
+func _add_torus(node_name: String, position: Vector3, radius: float, thickness: float, material: StandardMaterial3D) -> MeshInstance3D:
+	var mesh := TorusMesh.new()
+	mesh.inner_radius = radius
+	mesh.outer_radius = radius + thickness
+	mesh.rings = 24
+	mesh.ring_segments = 7
+	mesh.material = material
+	var instance := MeshInstance3D.new()
+	instance.name = node_name
+	instance.position = position
+	instance.mesh = mesh
+	add_child(instance)
+	return instance
+
+
+func _material(color: Color, metallic: float, roughness: float, emission := false) -> StandardMaterial3D:
+	var material := StandardMaterial3D.new()
+	material.albedo_color = color
+	material.metallic = metallic
+	material.roughness = roughness
+	if emission:
+		material.emission_enabled = true
+		material.emission = color
+		material.emission_energy_multiplier = 1.8
+	return material

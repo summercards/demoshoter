@@ -1,0 +1,108 @@
+[gd_scene load_steps=2 format=3 uid="uid://base_menu_scene"]
+
+[ext_resource type="Script" path="res://src/ui/BaseMenu.gd" id="1_basemenu"]
+
+[node name="BaseMenu" type="CanvasLayer"]
+script = ExtResource("1_basemenu")
+
+[node name="Background" type="ColorRect" parent="."]
+anchors_preset = 15
+anchor_right = 1.0
+anchor_bottom = 1.0
+grow_horizontal = 2
+grow_vertical = 2
+color = Color(0.08, 0.09, 0.12, 1.0)
+
+[node name="VBox" type="VBoxContainer" parent="."]
+anchor_left = 0.5
+anchor_top = 0.5
+anchor_right = 0.5
+anchor_bottom = 0.5
+offset_left = -420.0
+offset_top = -320.0
+offset_right = 420.0
+offset_bottom = 320.0
+grow_horizontal = 2
+grow_vertical = 2
+
+[node name="TitleLabel" type="Label" parent="VBox"]
+layout_mode = 2
+text = "基地管理终端"
+horizontal_alignment = 1
+vertical_alignment = 1
+
+[node name="HSeparator" type="HSeparator" parent="VBox"]
+layout_mode = 2
+
+[node name="LevelSelectButton" type="Button" parent="VBox"]
+custom_minimum_size = Vector2(840, 60)
+layout_mode = 2
+text = "副本入口位于基地外的野外道路"
+
+[node name="CloseOverlayButton" type="Button" parent="VBox"]
+visible = false
+custom_minimum_size = Vector2(840, 42)
+layout_mode = 2
+text = "返回自由基地"
+
+[node name="HSplit" type="HBoxContainer" parent="VBox"]
+layout_mode = 2
+size_flags_vertical = 3
+
+[node name="StartButton" type="Button" parent="VBox/HSplit"]
+custom_minimum_size = Vector2(200, 200)
+layout_mode = 2
+size_flags_horizontal = 3
+size_flags_vertical = 3
+text = "返回基地与荒野"
+
+[node name="RightPanel" type="VBoxContainer" parent="VBox/HSplit"]
+layout_mode = 2
+size_flags_horizontal = 3
+size_flags_vertical = 3
+
+[node name="StatsLabel" type="Label" parent="VBox/HSplit/RightPanel"]
+layout_mode = 2
+text = "基地数据"
+horizontal_alignment = 1
+
+[node name="StatsPanel" type="PanelContainer" parent="VBox/HSplit/RightPanel"]
+custom_minimum_size = Vector2(0, 80)
+layout_mode = 2
+
+[node name="VBox" type="VBoxContainer" parent="VBox/HSplit/RightPanel/StatsPanel"]
+layout_mode = 2
+
+[node name="RunsLabel" type="Label" parent="VBox/HSplit/RightPanel/StatsPanel/VBox"]
+layout_mode = 2
+text = "总局数: 0"
+
+[node name="ExtractionsLabel" type="Label" parent="VBox/HSplit/RightPanel/StatsPanel/VBox"]
+layout_mode = 2
+text = "成功撤离: 0"
+
+[node name="KillsLabel" type="Label" parent="VBox/HSplit/RightPanel/StatsPanel/VBox"]
+layout_mode = 2
+text = "总击杀: 0"
+
+[node name="PointsLabel" type="Label" parent="VBox/HSplit/RightPanel/StatsPanel/VBox"]
+layout_mode = 2
+text = "资源: 0"
+
+[node name="BuildingsLabel" type="Label" parent="VBox/HSplit/RightPanel"]
+layout_mode = 2
+text = "基地设施"
+horizontal_alignment = 1
+
+[node name="BuildingsGrid" type="GridContainer" parent="VBox/HSplit/RightPanel"]
+layout_mode = 2
+size_flags_vertical = 3
+columns = 2
+
+[node name="HSeparator2" type="HSeparator" parent="VBox"]
+layout_mode = 2
+
+[node name="FooterLabel" type="Label" parent="VBox"]
+layout_mode = 2
+text = "走出基地，沿道路寻找副本入口建筑"
+horizontal_alignment = 1

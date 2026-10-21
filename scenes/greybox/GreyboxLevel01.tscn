@@ -1,0 +1,19 @@
+[gd_scene load_steps=3 format=3]
+
+[ext_resource type="Script" path="res://scenes/greybox/greybox_builder.gd" id="1_greybox_builder"]
+
+[ext_resource type="PackedScene" path="res://scenes/Dungeon3D.tscn" id="2_base"]
+
+[node name="GreyboxLevel01" instance=ExtResource("2_base")]
+script = ExtResource("1_greybox_builder")
+level_id = "greybox_home"
+level_title = "初始灰盒"
+floor_size_m = 60
+wall_height_m = 6
+wall_thickness_m = 1
+cover_count = 6
+enemy_count = 5
+layout_variant = 0
+spawn_offset_m = Vector3(0, 1, 20)
+next_level_id = "99"
+spawn_real_player = true

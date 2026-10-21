@@ -1,0 +1,40 @@
+# 弹壳风暴2
+
+Godot 4.6 顶视角 3D 搜打撤肉鸽。当前项目版本为 `0.1.0`。
+
+关卡入口分两条并存路线，共用同一套房间、门、楼梯、美术与掉落实现：
+
+- **正式主线**：99F 基地中央**远征情报室**选关 → “传送进入副本”＝切换地图 → 独立关卡（目标为单层完整肉鸽关卡 + 撤离房间/撤离信号塔）。
+- **隐藏关卡**：塔楼连续爬楼，入口 `scenes/TowerDescent3D.tscn`（100F 天台 → 99F 基地 → 98F 到达门逐层下潜）。本轮不改动。
+
+契约见[关卡生成与爬楼](docs/v0.1/05_技术施工_关卡生成与爬楼.md) §3.0。单层化与撤离房间目前**尚未施工**。
+
+## 开始开发
+
+先阅读 [工程文档入口](docs/README.md)、[文档驱动开发规范](docs/DOCUMENTATION_STANDARD.md)与[功能契约索引](docs/v0.1/MODULE_INDEX.md)。设计规范和开发记录已分离；当前风险与验证基线见[工程健康审计](docs/v0.1/audits/2026-09-12_engineering_audit.md)。
+
+1. 使用 Godot 4.6.x 打开仓库根目录。
+2. 运行项目进入塔楼主循环。
+3. 修改前先阅读 [游戏设计文档 v0.1](docs/v0.1/README.md)；性能施工同时阅读 [性能优化与热管理](docs/v0.1/13_技术施工_性能优化与热管理.md)。
+4. 提交前运行 `./scripts/run_verification_suite.sh smoke`；涉及关卡、角色、战斗或资产时运行对应专项或 `full`。
+
+## 目录
+
+| 路径 | 职责 |
+|---|---|
+| `scenes/` | 可运行场景、UI 页面和场景装配入口 |
+| `src/framework/` | 跨系统稳定契约，不保存具体玩法状态 |
+| `src/core/` | 全局基础设施、状态机、存储与音频 |
+| `src/world3d/` | 当前 3D 关卡、房间、门、撤离和塔楼生成 |
+| `src/player3d/` / `src/enemy3d/` | 当前 3D 角色与怪物运行时 |
+| `src/game/` | 供正式 3D 运行时复用的维度无关玩法模块 |
+| `assets/art/` | 可替换美术资产及其源文件 |
+| `assets/registry/` | 美术资产唯一登记源 |
+| `tests/verification/` | 自动回归场景 |
+| `docs/v0.1/` | 当前唯一有效开发文档 |
+
+`outputs/`、`.dev-cycle/` 和 `.codex-tmp/` 都是可丢弃工作产物，不进入版本控制。
+
+开发临时产物放在上层 `ShellStorm2-work/`，历史制作源放在 `ShellStorm2-backup/`；见[管理与恢复记录](docs/v0.1/development/2026-10-11_workspace_slimming.md)。
+
+运行贴图遵循[尺寸与共享规则](docs/v0.1/design/runtime_texture_budget.md)：玩家最长边1024、怪物512、全部不超过1024；共享图在`assets/art/shared/textures/`。导出或重导入模型后运行`python scripts/check_runtime_texture_policy.py`，检查贴图超限、丢引用及内嵌图片回归。本次[优化记录](docs/v0.1/development/2026-10-11_runtime_texture_optimization.md)保留实际包体和验收证据。

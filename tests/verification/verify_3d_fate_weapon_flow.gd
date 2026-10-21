@@ -1,0 +1,144 @@
+extends Node
+
+const PLAYER_SCENE: PackedScene = preload("res://scenes/Player3D.tscn")
+
+
+func _ready() -> void:
+	var failures: Array[String] = []
+	await _verify_behavior_card("追踪弹", FateCardPresets.living_bullet(), "homing", true, failures)
+	await _verify_behavior_card("落地炮台", FateCardPresets.turret_on_land(), "spawn_turret_on_land", true, failures)
+	await _verify_behavior_card("回家看看", FateCardPresets.home_on_land(), "home_on_land", true, failures)
+	await _verify_behavior_card("连锁闪电", FateCardPresets.chain_lightning(), "chain_lightning", true, failures)
+	await _verify_behavior_card("弹跳弹", FateCardPresets.bounce_bullet(), "bounce", true, failures)
+	await _verify_behavior_card("弹幕模式", FateCardPresets.barrage_copy(), "copy_fire", true, failures)
+	await _verify_behavior_card("火焰融合", FateCardPresets.fuse_fire(), "fuse_damage", true, failures)
+	await _verify_behavior_card("冰霜融合", FateCardPresets.fuse_frost(), "freeze_duration", 0.5, failures)
+	await _verify_behavior_card("火力暴食", FateCardPresets.gluttony(), "size_growth", true, failures)
+	await _verify_behavior_card("换弹爆炸", FateCardPresets.explode_on_reload(), "explode_on_reload", true, failures)
+	await _verify_behavior_card("每第七发", FateCardPresets.every_seventh(), "every_nth_fire", 7, failures)
+	await _verify_secondary_gun(failures)
+	await _verify_attached_gun_and_uncontrolled(failures)
+	await _verify_numeric_cards(failures)
+	await _verify_relative_weapon_scale(failures)
+	if failures.is_empty():
+		print("3D_FATE_WEAPON_FLOW_OK: behaviors pass and weapon fate scale remains relative to the current 80% player mount baseline")
+		get_tree().quit(0)
+		return
+	for failure in failures:
+		push_error(failure)
+	get_tree().quit(1)
+
+
+func _verify_behavior_card(
+	label: String,
+	card: FateCard,
+	key: String,
+	expected: Variant,
+	failures: Array[String]
+) -> void:
+	var player := await _make_player()
+	var result := FateCardGameBridge.apply_card(card)
+	await get_tree().process_frame
+	if not bool(result.get("success", false)):
+		failures.append("3D fate card cannot apply: %s (%s)" % [label, result.get("message", "")])
+	else:
+		var behavior := player.get_weapon_snapshot().get("fate_behavior", {}) as Dictionary
+		if key == "freeze_duration":
+			var elements: Dictionary = behavior.get("fate_elements", {})
+			behavior = elements.get("ice", {})
+		if not behavior.has(key):
+			failures.append("3D adapter lost %s behavior key: %s" % [label, key])
+		elif expected is float and not is_equal_approx(float(behavior[key]), float(expected)):
+			failures.append("3D adapter value mismatch for %s/%s" % [label, key])
+		elif not expected is float and behavior[key] != expected:
+			failures.append("3D adapter value mismatch for %s/%s" % [label, key])
+	await _discard_player(player)
+
+
+func _verify_secondary_gun(failures: Array[String]) -> void:
+	var player := await _make_player()
+	var result := FateCardGameBridge.apply_card(FateCardPresets.gun_on_gun(), player.get_weapon_tree().root)
+	await get_tree().process_frame
+	if not bool(result.get("success", false)) or int(player.get_weapon_snapshot().get("secondary_gun_count", 0)) < 1:
+		failures.append("Gun-on-gun fate is not routed into 3D secondary fire")
+	await _discard_player(player)
+
+
+func _verify_attached_gun_and_uncontrolled(failures: Array[String]) -> void:
+	var player := await _make_player()
+	var attached := FateCardGameBridge.apply_card(FateCardPresets.bullet_carry_gun(), player.get_weapon_tree().root)
+	var unstable := FateCardGameBridge.apply_card(FateCardPresets.out_of_control())
+	await get_tree().process_frame
+	var behavior := player.get_weapon_snapshot().get("fate_behavior", {}) as Dictionary
+	if not bool(attached.get("success", false)) or not behavior.has("attached_gun"):
+		failures.append("Bullet-carry-gun fate is not routed into flying 3D projectiles")
+	if not bool(unstable.get("success", false)) or not bool(behavior.get("uncontrolled_gun", false)):
+		failures.append("Out-of-control mounted gun fate is not routed into 3D aim behavior")
+	await _discard_player(player)
+
+
+func _verify_numeric_cards(failures: Array[String]) -> void:
+	var player := await _make_player()
+	var base_fire_rate := float(player.get_weapon_snapshot().get("fire_rate", 0.0))
+	var overclock := FateCardGameBridge.apply_card(FateCardPresets.overclock())
+	await get_tree().process_frame
+	if not bool(overclock.get("success", false)) or float(player.get_weapon_snapshot().get("fire_rate", 0.0)) <= base_fire_rate:
+		failures.append("Overclock fate does not increase the 3D gun fire rate")
+	if not is_equal_approx(player.get_weapon_tree().get_overheat_penalty(), 1.0):
+		failures.append("未开火不能凭空积累过热")
+	if not player.weapon.try_fire(Vector3.FORWARD, player):
+		failures.append("超频实际射击前置失败")
+	var heat := player.get_weapon_tree().get_overheat_penalty()
+	if heat <= 1.0:
+		failures.append("实际开火后没有累积超频受击惩罚")
+	player.weapon._cooldown = 0.0
+	if not player.weapon.try_fire(Vector3.FORWARD, player) or player.get_weapon_tree().get_overheat_penalty() <= heat:
+		failures.append("第二次实际开火没有继续累积过热")
+	await _discard_player(player)
+
+
+func _verify_relative_weapon_scale(failures: Array[String]) -> void:
+	var player := await _make_player()
+	await get_tree().process_frame
+	var before := player.get_weapon_snapshot()
+	var base_global_scale := before.get("visual_global_scale", Vector3.ZERO) as Vector3
+	var base_weapon_scale := player.weapon.scale
+	var result := FateCardGameBridge.apply_card(FateCardPresets.huge_scale())
+	await get_tree().process_frame
+	await get_tree().process_frame
+	var after := player.get_weapon_snapshot()
+	var enlarged_global_scale := after.get("visual_global_scale", Vector3.ZERO) as Vector3
+	if not bool(result.get("success", false)):
+		failures.append("Huge-scale fate could not be applied for relative-size verification")
+	elif base_global_scale.x <= 0.0:
+		failures.append("Held weapon did not expose a valid current-baseline world scale")
+	else:
+		var world_ratio := enlarged_global_scale.x / base_global_scale.x
+		# 角色待机呼吸会在两个采样帧间给 VisualRoot 带来千分级变化；
+		# 命运本地倍率必须精确，最终世界倍率允许 1% 动画误差。
+		if not is_equal_approx(world_ratio, 2.0) and absf(world_ratio - 2.0) > 0.01:
+			failures.append(
+				"Huge-scale fate is not exactly 200%% of the current held-weapon baseline (before=%.4f after=%.4f ratio=%.4f local=%s)"
+				% [base_global_scale.x, enlarged_global_scale.x, world_ratio, str(after.get("visual_local_scale", Vector3.ZERO))]
+			)
+	if not player.weapon.scale.is_equal_approx(base_weapon_scale):
+		failures.append("Huge-scale fate overwrote the current weapon mount baseline")
+	if not is_equal_approx(float(after.get("fate_visual_multiplier", 0.0)), 2.0):
+		failures.append("Weapon snapshot does not preserve the relative 2.0 fate multiplier")
+	if not bool(after.get("fate_scale_is_relative_to_mount", false)):
+		failures.append("Weapon fate scaling is not declared relative to the current mount baseline")
+	await _discard_player(player)
+
+
+func _make_player() -> Player3D:
+	var player := PLAYER_SCENE.instantiate() as Player3D
+	player.position = Vector3(150, 0, 150)
+	add_child(player)
+	await get_tree().process_frame
+	FateCardGameBridge.set_player(player)
+	return player
+
+
+func _discard_player(player: Player3D) -> void:
+	player.queue_free()
+	await get_tree().process_frame

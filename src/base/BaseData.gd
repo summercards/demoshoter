@@ -1,0 +1,264 @@
+class_name BaseData
+extends Resource
+
+const SAVE_VERSION := "2.0"
+const TimeDomain = preload("res://src/core/WorldTimeDomain.gd")
+
+var total_runs: int = 0
+var successful_extractions: int = 0
+var total_kills: int = 0
+
+# 100F 天台只属于新手引导。玩家第一次进入 99F 基地后永久置为 true，
+# 后续启动、死亡回城和普通返航都从基地中点开始。
+var expedition_02_unlocked: bool = false
+var tutorial_completed: bool = false
+var base99_rooftop_ladder_deployed: bool = false
+
+# 建筑解锁状态
+var workshop_unlocked: bool = false
+var greenhouse_unlocked: bool = false
+var scrapyard_unlocked: bool = false
+var divination_unlocked: bool = false
+var vault_unlocked: bool = false
+var blackmarket_unlocked: bool = false
+var archive_unlocked: bool = false
+
+# 建筑等级
+var workshop_level: int = 0
+var greenhouse_level: int = 0
+var scrapyard_level: int = 0
+var divination_level: int = 0
+var vault_level: int = 0
+var blackmarket_level: int = 0
+var archive_level: int = 0
+
+# 解锁进度
+var blueprint_progress: float = 0.0  # 0.0-1.0
+var bullet_variant_progress: float = 0.0
+var boss_defeated: bool = false
+var zero_load_extraction: bool = false
+var five_tier_weapon_made: bool = false
+
+# 蓝图解锁Tier（枪身/子弹/配件各有一个Tier，影响局内掉落池）
+var blueprint_gunbody_tier: int = 0
+var blueprint_bullet_tier: int = 0
+var blueprint_attachment_tier: int = 0
+
+# 玩家累计资源点数（用于蓝图解锁消费）
+var extraction_points: int = 0
+
+# 保险柜物品数据（跨局持久化，格式：[{item, insured_at}, ...]）
+var vault_items: Array = []
+
+# 手电筒模块的永久解锁与装备状态(跨局持久化)。
+# 电池始终作为普通库存物品通过保险柜/待带入栏跨局，不维护第二份计数。
+var unlocked_flashlight_modules: Array[String] = []
+var equipped_flashlight_module_id: String = "basic"
+
+# 权威世界时钟与基地能源。世界时钟保存的是从
+# 各档起点起累计的“游戏秒”：新档09:00，无起点字段的旧档17:00。
+# 基地能源只随该游戏时间推进，不使用离线墙钟补偿。
+var world_time_start_unix_seconds: int = TimeDomain.START_UNIX_SECONDS
+var world_time_elapsed_game_seconds: float = 0.0
+var base_generator_enabled: bool = true
+var base_energy_current: float = 100.0
+var base_energy_capacity: float = 100.0
+var base_energy_last_synced_game_seconds: float = 0.0
+
+# 角色外观只保存合法的表现层装配 ID；不保存碰撞、武器或战斗状态。
+var avatar_customization: Dictionary = {}
+
+# 下一局预选命运卡片（格式：{card_id, card_name, card_type, card_rarity, description, tags, effect, visual}）
+var pending_fate_card: Dictionary = {}
+
+# 下一局从保险柜带入的物品（启动任务时从 vault_items 转移到局内背包）
+var pending_loadout_items: Array = []
+
+# 撤离后待存入仓库的战利品（返回大厅后显示，可一键存入或逐个存入）
+var extraction_loot: Array = []
+
+# 死亡时从随身保险格转存的原槽快照。它只跨越“死亡场景 → 99F基地场景”
+# 这一条边界；基地运行态检查点成功接管后会原子清空，不能混入撤离战利品。
+var pending_insurance_slots: Array = []
+
+# 合成目录的硬保底计数（跨局持久）。键 = 被保底的钥匙物品 ID，值 = `{misses:int}`。
+# 语义与判据见 SynthesisCatalog.resolve_settlement：**只在击败过首领的局里记账**，
+# 没打首领的局既不累加也不清零，否则「进图→撤离」可以无限刷计数。
+# 旧档没有这个字段 = 一次都没记过账。
+var synthesis_pity: Dictionary = {}
+
+# 存档封套元数据与有界事务幂等日志
+var save_revision: int = 0
+var last_saved_at_unix: int = 0
+var last_save_reason: String = ""
+var completed_transaction_ids: Array[String] = []
+
+# 仅允许保存已经通过完整性校验的行动检查点；空字典表示当前不可续局。
+var active_run_snapshot: Dictionary = {}
+
+# 12只唯一精英的跨局档案。键为稳定elite_id，值只含JSON安全字段；
+# 当前场景节点与玩家weapon_instance_id不得进入此字典。
+var elite_archive_records: Dictionary = {}
+
+# 跨局剧情历史。键 = 稳定 narrative_id；值只含 JSON 安全字段：
+#   {completed_count:int, first_completed_unix:int, last_completed_unix:int, last_result:String}
+# 「完成」的定义 = 完整收口（演到 duration / flow.end / 玩家 skip）；被抢占或 abort 不算。
+# 本字段是 `once = "run"` 剧本「跨存档只播一次」的唯一依据（08 文档 §9，2026-09-23 落地）。
+var narrative_history: Dictionary = {}
+
+func _to_dict() -> Dictionary:
+	return {
+		"save_version": SAVE_VERSION,
+		"total_runs": total_runs,
+		"successful_extractions": successful_extractions,
+		"total_kills": total_kills,
+		"tutorial_completed": tutorial_completed,
+		"expedition_02_unlocked": expedition_02_unlocked,
+		"base99_rooftop_ladder_deployed": base99_rooftop_ladder_deployed,
+		"workshop_unlocked": workshop_unlocked,
+		"greenhouse_unlocked": greenhouse_unlocked,
+		"scrapyard_unlocked": scrapyard_unlocked,
+		"divination_unlocked": divination_unlocked,
+		"vault_unlocked": vault_unlocked,
+		"blackmarket_unlocked": blackmarket_unlocked,
+		"archive_unlocked": archive_unlocked,
+		"workshop_level": workshop_level,
+		"greenhouse_level": greenhouse_level,
+		"scrapyard_level": scrapyard_level,
+		"divination_level": divination_level,
+		"vault_level": vault_level,
+		"blackmarket_level": blackmarket_level,
+		"archive_level": archive_level,
+		"blueprint_progress": blueprint_progress,
+		"bullet_variant_progress": bullet_variant_progress,
+		"boss_defeated": boss_defeated,
+		"zero_load_extraction": zero_load_extraction,
+		"five_tier_weapon_made": five_tier_weapon_made,
+		"blueprint_gunbody_tier": blueprint_gunbody_tier,
+		"blueprint_bullet_tier": blueprint_bullet_tier,
+		"blueprint_attachment_tier": blueprint_attachment_tier,
+		"extraction_points": extraction_points,
+		"vault_items": vault_items,
+		"unlocked_flashlight_modules": unlocked_flashlight_modules,
+		"equipped_flashlight_module_id": equipped_flashlight_module_id,
+		"world_time_start_unix_seconds": world_time_start_unix_seconds,
+		"world_time_elapsed_game_seconds": world_time_elapsed_game_seconds,
+		"base_generator_enabled": base_generator_enabled,
+		"base_energy_current": base_energy_current,
+		"base_energy_capacity": base_energy_capacity,
+		"base_energy_last_synced_game_seconds": base_energy_last_synced_game_seconds,
+		"avatar_customization": avatar_customization.duplicate(true),
+		"pending_fate_card": pending_fate_card,
+		"pending_loadout_items": pending_loadout_items,
+		"extraction_loot": extraction_loot,
+		"pending_insurance_slots": pending_insurance_slots,
+		"synthesis_pity": synthesis_pity,
+		"save_revision": save_revision,
+		"last_saved_at_unix": last_saved_at_unix,
+		"last_save_reason": last_save_reason,
+		"completed_transaction_ids": completed_transaction_ids,
+		"active_run_snapshot": active_run_snapshot,
+		"elite_archive_records": elite_archive_records,
+		"narrative_history": narrative_history,
+	}
+
+static func from_dict(d: Dictionary) -> BaseData:
+	var data := BaseData.new()
+	data.expedition_02_unlocked = bool(d.get("expedition_02_unlocked", false))
+	if d.has("total_runs"): data.total_runs = d["total_runs"]
+	if d.has("successful_extractions"): data.successful_extractions = d["successful_extractions"]
+	if d.has("total_kills"): data.total_kills = d["total_kills"]
+	if d.has("tutorial_completed"):
+		data.tutorial_completed = bool(d["tutorial_completed"])
+	else:
+		# 1.3 及更早的档没有显式新手字段。只有已经形成长期进度的旧档
+		# 才直接迁移为已完成，纯零进度档仍保留一次天台引导。
+		data.tutorial_completed = (
+			data.total_runs > 0
+			or data.successful_extractions > 0
+			or int(d.get("extraction_points", 0)) > 0
+			or bool(d.get("boss_defeated", false))
+		)
+	data.base99_rooftop_ladder_deployed = bool(d.get("base99_rooftop_ladder_deployed", false))
+	if d.has("workshop_unlocked"): data.workshop_unlocked = d["workshop_unlocked"]
+	if d.has("greenhouse_unlocked"): data.greenhouse_unlocked = d["greenhouse_unlocked"]
+	if d.has("scrapyard_unlocked"): data.scrapyard_unlocked = d["scrapyard_unlocked"]
+	if d.has("divination_unlocked"): data.divination_unlocked = d["divination_unlocked"]
+	if d.has("vault_unlocked"): data.vault_unlocked = d["vault_unlocked"]
+	if d.has("blackmarket_unlocked"): data.blackmarket_unlocked = d["blackmarket_unlocked"]
+	if d.has("archive_unlocked"): data.archive_unlocked = d["archive_unlocked"]
+	if d.has("workshop_level"): data.workshop_level = d["workshop_level"]
+	if d.has("greenhouse_level"): data.greenhouse_level = d["greenhouse_level"]
+	if d.has("scrapyard_level"): data.scrapyard_level = d["scrapyard_level"]
+	if d.has("divination_level"): data.divination_level = d["divination_level"]
+	if d.has("vault_level"): data.vault_level = d["vault_level"]
+	if d.has("blackmarket_level"): data.blackmarket_level = d["blackmarket_level"]
+	if d.has("archive_level"): data.archive_level = d["archive_level"]
+	if d.has("blueprint_progress"): data.blueprint_progress = d["blueprint_progress"]
+	if d.has("bullet_variant_progress"): data.bullet_variant_progress = d["bullet_variant_progress"]
+	if d.has("boss_defeated"): data.boss_defeated = d["boss_defeated"]
+	if d.has("zero_load_extraction"): data.zero_load_extraction = d["zero_load_extraction"]
+	if d.has("five_tier_weapon_made"): data.five_tier_weapon_made = d["five_tier_weapon_made"]
+	if d.has("blueprint_gunbody_tier"): data.blueprint_gunbody_tier = d["blueprint_gunbody_tier"]
+	if d.has("blueprint_bullet_tier"): data.blueprint_bullet_tier = d["blueprint_bullet_tier"]
+	if d.has("blueprint_attachment_tier"): data.blueprint_attachment_tier = d["blueprint_attachment_tier"]
+	if d.has("extraction_points"): data.extraction_points = d["extraction_points"]
+	if d.has("vault_items") and d["vault_items"] is Array: data.vault_items = Array(d["vault_items"])
+	if d.has("unlocked_flashlight_modules") and d["unlocked_flashlight_modules"] is Array:
+		for module_id in d["unlocked_flashlight_modules"]:
+			var normalized := str(module_id)
+			if normalized in ["advanced", "efficient"] and normalized not in data.unlocked_flashlight_modules:
+				data.unlocked_flashlight_modules.append(normalized)
+	if d.has("equipped_flashlight_module_id"):
+		data.equipped_flashlight_module_id = str(d["equipped_flashlight_module_id"])
+	data.world_time_start_unix_seconds = int(d.get("world_time_start_unix_seconds", TimeDomain.LEGACY_START_UNIX_SECONDS))
+	if data.world_time_start_unix_seconds not in [TimeDomain.START_UNIX_SECONDS, TimeDomain.LEGACY_START_UNIX_SECONDS]:
+		data.world_time_start_unix_seconds = TimeDomain.LEGACY_START_UNIX_SECONDS
+	if d.has("world_time_elapsed_game_seconds"):
+		data.world_time_elapsed_game_seconds = maxf(0.0, float(d["world_time_elapsed_game_seconds"]))
+	data.base_generator_enabled = bool(d.get("base_generator_enabled", true))
+	if d.has("base_energy_capacity"):
+		data.base_energy_capacity = maxf(1.0, float(d["base_energy_capacity"]))
+	if d.has("base_energy_current"):
+		data.base_energy_current = clampf(float(d["base_energy_current"]), 0.0, data.base_energy_capacity)
+	if d.has("base_energy_last_synced_game_seconds"):
+		data.base_energy_last_synced_game_seconds = maxf(
+			0.0, float(d["base_energy_last_synced_game_seconds"])
+		)
+	if d.has("avatar_customization") and d["avatar_customization"] is Dictionary:
+		data.avatar_customization = (d["avatar_customization"] as Dictionary).duplicate(true)
+	if d.has("pending_fate_card"): data.pending_fate_card = d["pending_fate_card"]
+	if d.has("pending_loadout_items") and d["pending_loadout_items"] is Array: data.pending_loadout_items = Array(d["pending_loadout_items"])
+	if d.has("extraction_loot") and d["extraction_loot"] is Array: data.extraction_loot = Array(d["extraction_loot"])
+	if d.has("pending_insurance_slots") and d["pending_insurance_slots"] is Array: data.pending_insurance_slots = Array(d["pending_insurance_slots"])
+	# 保底计数只接受「键 → 字典」的形状。坏形状视为没记过账，而不是把整个计数清成 0
+	# 后照常跑 —— 后者会让一个被写坏的值变成"差 3 次"的既成事实。
+	if d.has("synthesis_pity") and d["synthesis_pity"] is Dictionary:
+		for raw_key in (d["synthesis_pity"] as Dictionary).keys():
+			var bucket: Variant = (d["synthesis_pity"] as Dictionary).get(raw_key)
+			if bucket is Dictionary:
+				data.synthesis_pity[str(raw_key)] = {
+					"misses": maxi(0, int((bucket as Dictionary).get("misses", 0))),
+				}
+	if d.has("save_revision"): data.save_revision = int(d["save_revision"])
+	if d.has("last_saved_at_unix"): data.last_saved_at_unix = int(d["last_saved_at_unix"])
+	if d.has("last_save_reason"): data.last_save_reason = str(d["last_save_reason"])
+	if d.has("completed_transaction_ids") and d["completed_transaction_ids"] is Array:
+		for transaction_id in d["completed_transaction_ids"]:
+			data.completed_transaction_ids.append(str(transaction_id))
+	if d.has("active_run_snapshot") and d["active_run_snapshot"] is Dictionary:
+		data.active_run_snapshot = (d["active_run_snapshot"] as Dictionary).duplicate(true)
+	if d.has("elite_archive_records") and d["elite_archive_records"] is Dictionary:
+		data.elite_archive_records = (d["elite_archive_records"] as Dictionary).duplicate(true)
+	# 旧档没有这个字段 = 没有任何剧情播过（会让已看过的 `run` 剧情重播一次，属既有声明）。
+	if d.has("narrative_history") and d["narrative_history"] is Dictionary:
+		data.narrative_history = (d["narrative_history"] as Dictionary).duplicate(true)
+	else:
+		data.narrative_history = {}
+	return data
+
+func record_run(success: bool, kills: int) -> void:
+	total_runs += 1
+	total_kills += kills
+	if success:
+		successful_extractions += 1

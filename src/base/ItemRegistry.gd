@@ -1,0 +1,1436 @@
+class_name ItemRegistry
+extends RefCounted
+## 物品注册表 — 全局游戏物品定义
+## 提供所有可获取物品的数据模板，供掉落系统、背包、商人使用
+## 不负责堆叠/格子等运行时数据，只提供静态物品定义
+
+## 单例引用
+static var _instance: ItemRegistry = null
+static func get_instance() -> ItemRegistry:
+	if _instance == null:
+		_instance = ItemRegistry.new()
+	return _instance
+
+## 物品字典：item_id -> item_definition
+var _items: Dictionary = {}
+
+func _init() -> void:
+	_register_all_items()
+	_apply_grid_sizes()
+
+## 注册所有内置物品
+func _register_all_items() -> void:
+	_register_beacon_item()
+	_register_room_key_item()
+	_register_backpack_equipment()
+	_register_weapon_modules()
+	_register_consumables()
+	_register_flashlight_modules()
+	_apply_base_shop_catalog()
+
+
+## ————————————————————————————————
+## 格子背包占格尺寸（三角洲行动/塔科夫式棋盘背包）
+## ————————————————————————————————
+## 真源表：每件物品在背包棋盘上占的宽×高（格）。口径：
+##   长枪 4×2 · 狙击/发射器 5×2 · 手枪 2×1 · 近战长柄 3×1 · 重斧 2×2
+##   蓝图(纸) 2×1 · 背包本体按容量档 2×2/3×3/4×4 · 电芯包/信标 2×2
+##   大电池/子弹模块 2×1 · 药水/弹药/小电池/钥匙/手电模块/配件 1×1
+## 未登记的物品按 1×1 兜底 —— 新物品忘了登记也放得进包，只是不占便宜。
+## 存的是 JSON 安全的 [w, h] 数组（物品字典会整包进存档，Vector2i 会炸序列化）。
+## 装备位（武器槽/配件网格/背包装备槽/手电位）**不读这张表**：
+## 装备只看可装备性（type/subtype，沿用既有判定），与占格无关。
+const GRID_SIZES: Dictionary = {
+	# 远程武器
+	"weapon_pistol": [2, 1],
+	"weapon_shotgun": [4, 2],
+	"weapon_rifle": [4, 2],
+	"weapon_machinegun": [4, 2],
+	"weapon_sprinkler": [4, 2],
+	"weapon_starter_rifle": [4, 2],
+	"weapon_sniper": [5, 2],
+	"weapon_launcher": [5, 2],
+	"weapon_charge": [3, 2],
+	# 近战武器
+	"weapon_baseball_bat": [3, 1],
+	"weapon_greatblade": [3, 1],
+	"weapon_waraxe": [2, 2],
+	# 背包装备（装备中不占格；作为物品放进包里时占格）
+	"equipment_backpack_2": [2, 2],
+	"equipment_backpack_4": [3, 3],
+	"equipment_backpack_8": [4, 4],
+	# 消耗品
+	"item_health_potion": [1, 1],
+	"item_ammo_pack": [1, 1],
+	"item_battery_s": [1, 1],
+	"item_battery_l": [2, 1],
+	"item_cell_pack": [2, 2],
+	"item_beacon": [2, 2],
+	# 钥匙
+	"item_room_key": [1, 1],
+	# 手电模块
+	"item_flashlight_basic": [1, 1],
+	"item_flashlight_advanced": [1, 1],
+	"item_flashlight_efficient": [1, 1],
+}
+
+## 子弹模块与配件整族统一尺寸，不逐个登记。
+const GRID_SIZE_FAMILY_DEFAULTS: Dictionary = {
+	"mod_bullet_": [2, 1],
+	"attach_": [1, 1],
+	"bp_": [2, 1],
+}
+
+## 把占格尺寸写进每个物品字典（grid_size = [w, h]，JSON 安全）。
+func _apply_grid_sizes() -> void:
+	for item_id in _items.keys():
+		var definition := _items[item_id] as Dictionary
+		var size: Array = GRID_SIZES.get(item_id, [1, 1]) as Array
+		for prefix in GRID_SIZE_FAMILY_DEFAULTS.keys():
+			if str(item_id).begins_with(str(prefix)):
+				size = GRID_SIZE_FAMILY_DEFAULTS.get(prefix, [1, 1]) as Array
+				break
+		definition["grid_size"] = [int(size[0]), int(size[1])]
+		definition["grid_area"] = int(size[0]) * int(size[1])
+
+## 查询物品占格（未知物品 1×1 兜底）。返回 Vector2i 供棋盘逻辑用。
+func get_grid_size(item_id: String) -> Vector2i:
+	var entry: Array = GRID_SIZES.get(item_id, []) as Array
+	if entry.is_empty():
+		for prefix in GRID_SIZE_FAMILY_DEFAULTS.keys():
+			if item_id.begins_with(str(prefix)):
+				entry = GRID_SIZE_FAMILY_DEFAULTS.get(prefix, [1, 1]) as Array
+				break
+	if entry.is_empty():
+		return Vector2i.ONE
+	return Vector2i(int(entry[0]), int(entry[1]))
+
+## 查询物品字典的占格；物品字典可能带 grid_size（注册表应用过），缺字段时回退注册表。
+static func grid_size_of(item: Dictionary) -> Vector2i:
+	var raw: Variant = item.get("grid_size", null)
+	if raw is Array and (raw as Array).size() >= 2:
+		return Vector2i(int((raw as Array)[0]), int((raw as Array)[1]))
+	return get_instance().get_grid_size(str(item.get("id", "")))
+
+
+## 与内容数据库“基地商店”工作表一致的运行时投影。
+## price 是通用价值；基地成交只读取 base_buy_price/base_sell_price。
+func _apply_base_shop_catalog() -> void:
+	for item_id in _items.keys():
+		var definition := _items[item_id] as Dictionary
+		var generic_price := maxi(0, int(definition.get("price", 0)))
+		definition["base_buy_price"] = generic_price
+		definition["base_sell_price"] = roundi(float(generic_price) * 0.5) if generic_price > 0 else 0
+		definition["base_shop_enabled"] = false
+		definition["base_stock_rule"] = "not_listed"
+		definition["base_shelf_order"] = 0
+	var catalog := {
+		"weapon_baseball_bat": [45, 23, 1, "base_stock_baseball_bat"],
+		"weapon_pistol": [70, 35, 2, "base_stock_pistol"],
+		"weapon_shotgun": [110, 55, 3, "base_stock_shotgun"],
+		"weapon_rifle": [150, 75, 4, "base_stock_rifle"],
+		"equipment_backpack_2": [55, 28, 5, "base_stock_backpack_2"],
+		"item_health_potion": [40, 20, 6, "base_stock_health_potion"],
+		"item_battery_s": [25, 12, 7, "base_stock_battery_s"],
+	}
+	for item_id in catalog.keys():
+		if not _items.has(item_id):
+			push_error("[ItemRegistry] Base shop item missing: %s" % item_id)
+			continue
+		var values: Array = catalog[item_id]
+		var definition := _items[item_id] as Dictionary
+		definition["base_buy_price"] = int(values[0])
+		definition["base_sell_price"] = int(values[1])
+		definition["base_shop_enabled"] = true
+		definition["base_stock_rule"] = "unlimited"
+		definition["base_shelf_order"] = int(values[2])
+		definition["base_shop_entry_id"] = str(values[3])
+
+## 注册信标道具
+func _register_beacon_item() -> void:
+	_items["item_beacon"] = {
+		"id": "item_beacon",
+		"name": "撤离信标",
+		"description": "消耗此道具召唤紧急撤离点。读条期间会刷出追击怪物。",
+		"type": "consumable",
+		"rarity": "rare",
+		"stack_max": 3,
+		"tags": ["extraction", "consumable", "beacon"],
+		"use_action": "summon_beacon_extraction",
+		"floor_loot_weights": {
+			"loot_floor_1_2": 1.0,
+			"loot_floor_3_4": 1.5,
+			"loot_floor_5": 2.0,
+			"loot_abyss": 2.5,
+			"boss_floor_1": 3.0,
+			"boss_floor_2": 4.0,
+			"scavenge_floor_1": 0.8,
+			"scavenge_floor_2": 1.0,
+			"scavenge_floor_3": 1.2,
+			"scavenge_floor_4": 1.5,
+			"scavenge_floor_5": 1.8,
+			"elite_floor_1": 1.5,
+			"elite_floor_2": 1.5,
+			"combat_floor_4": 0.8,
+			"combat_floor_5": 1.2,
+		},
+		"merchant_tier": 2,
+		"price": 150,
+	}
+
+func _register_room_key_item() -> void:
+	_items["item_room_key"] = {
+		"id": "item_room_key",
+		"name": "房间钥匙",
+		"description": "用于开启地图上的一扇房门。来自怪物掉落或房间搜索。",
+		"type": "key",
+		"rarity": "common",
+		"stack_max": 9,
+		"tags": ["key", "progression"],
+		"price": 40,
+		"floor_loot_weights": {
+			"loot_common": 1.0,
+			"loot_floor_1_2": 1.8,
+			"scavenge_floor_1": 2.4,
+			"scavenge_floor_2": 2.0,
+			"combat_floor_1": 1.2,
+			"elite_floor_1": 1.0,
+			"elite_floor_2": 1.0,
+		},
+	}
+
+
+func _register_backpack_equipment() -> void:
+	var backpacks: Array[Dictionary] = [
+		{
+			"id": "equipment_backpack_2",
+			"name": "轻型腰包",
+			"description": "装备后增加2个背包格。可从搜索容器或普通怪物身上获得。",
+			"type": "equipment",
+			"subtype": "backpack",
+			"rarity": "common",
+			"stack_max": 1,
+			"extra_slots": 2,
+			"tags": ["equipment", "backpack", "capacity"],
+			"floor_loot_weights": {
+				"loot_common": 0.22,
+				"loot_floor_1_2": 0.50,
+				"scavenge_floor_1": 1.20,
+				"scavenge_floor_2": 0.90,
+				"combat_floor_1": 0.28,
+				"combat_floor_2": 0.20,
+			},
+			"price": 55,
+			"merchant_tier": 1,
+		},
+		{
+			"id": "equipment_backpack_4",
+			"name": "战术背包",
+			"description": "装备后增加4个背包格。主要来自中层搜索与精英怪物。",
+			"type": "equipment",
+			"subtype": "backpack",
+			"rarity": "uncommon",
+			"stack_max": 1,
+			"extra_slots": 4,
+			"tags": ["equipment", "backpack", "capacity"],
+			"floor_loot_weights": {
+				"loot_floor_1_2": 0.16,
+				"loot_floor_3_4": 0.65,
+				"scavenge_floor_2": 0.35,
+				"scavenge_floor_3": 1.00,
+				"scavenge_floor_4": 0.80,
+				"elite_floor_1": 0.85,
+				"elite_floor_2": 0.55,
+				"combat_floor_3": 0.22,
+			},
+			"price": 120,
+			"merchant_tier": 2,
+		},
+		{
+			"id": "equipment_backpack_8",
+			"name": "远征背包",
+			"description": "装备后增加8个背包格。主要来自深层搜索、精英与Boss。",
+			"type": "equipment",
+			"subtype": "backpack",
+			"rarity": "rare",
+			"stack_max": 1,
+			"extra_slots": 8,
+			"tags": ["equipment", "backpack", "capacity"],
+			"floor_loot_weights": {
+				"loot_floor_5": 0.55,
+				"loot_abyss": 0.85,
+				"scavenge_floor_4": 0.25,
+				"scavenge_floor_5": 0.90,
+				"elite_floor_2": 0.75,
+				"boss_floor_1": 1.25,
+				"boss_floor_2": 1.80,
+			},
+			"price": 260,
+			"merchant_tier": 3,
+		},
+	]
+	for backpack in backpacks:
+		_items[str(backpack["id"])] = backpack
+
+## 注册武器模块类（蓝图类，玩家获得后可在基地解锁）
+func _register_weapon_modules() -> void:
+	# Tier 0 — 基础（总是可用）
+	_register_weapon_drops()
+	_register_gunbody_tier0()
+	# Tier 1 — 解锁后追加
+	_register_gunbody_tier1()
+	_register_bullet_tier0()
+	_register_bullet_tier1()
+	_register_attachment_tier0()
+	_register_attachment_tier1()
+
+func _register_weapon_drops() -> void:
+	var weapons: Array = [
+		{
+			"id": "weapon_pistol",
+			"assembly_id": "bp_pistol",
+			"name": "豌豆手枪",
+			"description": "可靠的基础半自动武器。左键装备为当前主武器。",
+			"type": "weapon",
+			"subtype": "gun_body",
+			"rarity": "common",
+			"stack_max": 1,
+			"tags": ["weapon", "gun_body", "pistol"],
+			# 2026-10-18 枪械产出收口：普通怪池（loot_floor_* / loot_abyss）**不再含远程枪械**。
+			# 枪只从 Boss / 强化怪 / 精英 / 搜刮容器出，普通怪只能掉近战（见文件末尾说明）。
+			"floor_loot_weights": {
+				"scavenge_floor_1": 0.8,
+				"scavenge_floor_2": 1.4,
+				"strong_weapon_floor_1": 1.0,
+				"combat_floor_1": 0.5,
+				"combat_floor_2": 0.8,
+			},
+			"price": 70,
+		},
+		{
+			"id": "weapon_shotgun",
+			"assembly_id": "bp_shotgun",
+			"name": "散射喷壶",
+			"description": "近距离多弹丸散射武器。左键装备为当前主武器。",
+			"type": "weapon",
+			"subtype": "gun_body",
+			"rarity": "uncommon",
+			"stack_max": 1,
+			"tags": ["weapon", "gun_body", "shotgun"],
+			"floor_loot_weights": {
+				"spawn_starter": 3.0,
+				"scavenge_floor_1": 1.4,
+				"scavenge_floor_2": 2.0,
+				"strong_weapon_floor_1": 1.0,
+				"strong_weapon_floor_2": 0.6,
+				"boss_weapon_floor_1": 0.8,
+				"combat_floor_1": 0.8,
+				"combat_floor_2": 1.2,
+			},
+			"price": 110,
+		},
+		{
+			"id": "weapon_rifle",
+			"assembly_id": "bp_rifle",
+			"name": "步枪",
+			"description": "稳定连发的中距离武器。左键装备为当前主武器。",
+			"type": "weapon",
+			"subtype": "gun_body",
+			"rarity": "rare",
+			"stack_max": 1,
+			"tags": ["weapon", "gun_body", "rifle"],
+			"price": 150,
+			"loot_table_tier": 1,
+			"floor_loot_weights": {
+				"boss_weapon_floor_1": 1.0,
+				"boss_weapon_floor_2": 1.0,
+				"strong_weapon_floor_1": 0.4,
+				"strong_weapon_floor_2": 1.0,
+				"scavenge_floor_3": 1.0,
+				"scavenge_floor_4": 1.5,
+				"scavenge_floor_5": 1.4,
+				"combat_floor_1": 0.5,
+				"combat_floor_2": 1.0,
+				"combat_floor_3": 1.5,
+				"elite_floor_1": 1.5,
+				"elite_floor_2": 2.0,
+			},
+		},
+		{
+			"id": "weapon_machinegun",
+			"assembly_id": "bp_machinegun",
+			"name": "蜂窝机枪",
+			"description": "高射速压制武器，适合清群怪。左键装备为当前主武器。",
+			"type": "weapon",
+			"subtype": "gun_body",
+			"rarity": "uncommon",
+			"stack_max": 1,
+			"tags": ["weapon", "gun_body", "auto"],
+			"price": 180,
+			"loot_table_tier": 1,
+			"floor_loot_weights": {
+				"boss_weapon_floor_1": 0.8,
+				"boss_weapon_floor_2": 0.8,
+				"strong_weapon_floor_1": 0.6,
+				"strong_weapon_floor_2": 1.0,
+				"scavenge_floor_1": 0.5,
+				"scavenge_floor_2": 1.0,
+				"scavenge_floor_3": 1.2,
+				"scavenge_floor_4": 1.5,
+				"scavenge_floor_5": 1.75,
+				"combat_floor_1": 0.8,
+				"combat_floor_2": 1.2,
+				"combat_floor_3": 1.5,
+				"elite_floor_1": 1.5,
+				"elite_floor_2": 2.5,
+			},
+		},
+		{
+			"id": "weapon_sprinkler",
+			"assembly_id": "bp_sprinkler",
+			"name": "花洒机枪",
+			"description": "出厂标配的连射武器。弹匣大、射速快、单发伤害低，靠持续泼洒火力压制走廊。左键装备为当前主武器。",
+			"type": "weapon",
+			"subtype": "gun_body",
+			"rarity": "uncommon",
+			"stack_max": 1,
+			"tags": ["weapon", "gun_body", "auto"],
+			"price": 90,
+			# 出厂枪的命运槽刻意只有通用枪械的一半：白送不代表能长成终局武器。
+			"fate_slot_capacity": 4,
+			"loot_table_tier": 0,
+			"floor_loot_weights": {
+				"strong_weapon_floor_1": 0.8,
+				"strong_weapon_floor_2": 0.6,
+				"boss_weapon_floor_2": 0.4,
+				"scavenge_floor_1": 0.25,
+				"scavenge_floor_2": 0.5,
+				"scavenge_floor_3": 0.6,
+				"scavenge_floor_4": 0.75,
+				"scavenge_floor_5": 0.875,
+				"combat_floor_1": 0.4,
+				"combat_floor_2": 0.6,
+				"combat_floor_3": 0.75,
+				"elite_floor_1": 0.75,
+				"elite_floor_2": 1.25,
+			},
+		},
+		{
+			"id": "weapon_starter_rifle",
+			"assembly_id": "bp_starter_rifle",
+			"name": "初始步枪",
+			"description": "出厂配发的突击步枪。高单发伤害与高射速，换弹快，是开局唯一可靠的武器。左键装备为当前主武器。",
+			"type": "weapon",
+			"subtype": "gun_body",
+			"rarity": "common",
+			"stack_max": 1,
+			"tags": ["weapon", "gun_body", "rifle"],
+			"price": 120,
+			# 与花洒机枪同口径：出厂白送枪的命运槽刻意只有通用枪械的一半。
+			"fate_slot_capacity": 4,
+			"loot_table_tier": 0,
+			# 出厂枪与花洒机枪同为 tier0 白送定位，掉落权重沿用同一组值（2026-10-18 同步收口）。
+			"floor_loot_weights": {
+				"strong_weapon_floor_1": 0.8,
+				"strong_weapon_floor_2": 0.5,
+				"boss_weapon_floor_2": 0.4,
+				"scavenge_floor_1": 0.25,
+				"scavenge_floor_2": 0.5,
+				"scavenge_floor_3": 0.6,
+				"scavenge_floor_4": 0.75,
+				"scavenge_floor_5": 0.875,
+				"combat_floor_1": 0.4,
+				"combat_floor_2": 0.6,
+				"combat_floor_3": 0.75,
+				"elite_floor_1": 0.75,
+				"elite_floor_2": 1.25,
+			},
+		},
+		{
+			"id": "weapon_sniper",
+			"assembly_id": "bp_sniper",
+			"name": "弹弓狙击",
+			"description": "低射速高伤害，穿透力强，适合精准打击。左键装备为当前主武器。",
+			"type": "weapon",
+			"subtype": "gun_body",
+			"rarity": "rare",
+			"stack_max": 1,
+			"tags": ["weapon", "gun_body", "sniper"],
+			"price": 220,
+			"loot_table_tier": 2,
+			"floor_loot_weights": {
+				"boss_weapon_floor_1": 1.0,
+				"boss_weapon_floor_2": 1.0,
+				"strong_weapon_floor_2": 0.8,
+				"scavenge_floor_3": 0.5,
+				"scavenge_floor_4": 1.0,
+				"scavenge_floor_5": 1.4,
+				"combat_floor_2": 0.3,
+				"combat_floor_3": 0.8,
+				"elite_floor_1": 1.5,
+				"elite_floor_2": 2.0,
+			},
+		},
+		{
+			"id": "weapon_launcher",
+			"assembly_id": "bp_launcher",
+			"name": "反胃榴弹筒",
+			"description": "发射爆炸弹，抛物线弹道，大范围AOE。左键装备为当前主武器。",
+			"type": "weapon",
+			"subtype": "gun_body",
+			"rarity": "rare",
+			"stack_max": 1,
+			"tags": ["weapon", "gun_body", "launcher"],
+			"price": 250,
+			"loot_table_tier": 2,
+			"floor_loot_weights": {
+				"boss_weapon_floor_1": 1.0,
+				"boss_weapon_floor_2": 1.0,
+				"strong_weapon_floor_2": 0.8,
+				"scavenge_floor_3": 0.5,
+				"scavenge_floor_4": 1.0,
+				"scavenge_floor_5": 1.4,
+				"combat_floor_3": 0.8,
+				"combat_floor_4": 0.5,
+				"combat_floor_5": 1.0,
+				"elite_floor_2": 3.0,
+			},
+		},
+		{
+			"id": "weapon_charge",
+			"assembly_id": "bp_charge",
+			"name": "蓄力萝卜炮",
+			"description": "蓄力时间越长伤害越高，超蓄力后弹体变大并附带穿透。左键装备为当前主武器。",
+			"type": "weapon",
+			"subtype": "gun_body",
+			"rarity": "epic",
+			"stack_max": 1,
+			"tags": ["weapon", "gun_body", "charge"],
+			"price": 350,
+			"loot_table_tier": 3,
+			"floor_loot_weights": {
+				"boss_weapon_floor_2": 1.0,
+				"strong_weapon_floor_2": 0.5,
+				"scavenge_floor_4": 0.4,
+				"scavenge_floor_5": 0.7,
+				"combat_floor_4": 0.5,
+				"combat_floor_5": 1.0,
+				"elite_floor_2": 3.0,
+			},
+		},
+		{
+			"id": "weapon_baseball_bat",
+			"assembly_id": "bp_baseball_bat",
+			"name": "废土棒球棍",
+			"description": "基地贩卖机提供的初级近战武器。三段快速挥击，第三段重挥具有更强击退。",
+			"type": "weapon",
+			"subtype": "melee_weapon",
+			"rarity": "common",
+			"stack_max": 1,
+			"tags": ["weapon", "melee", "light_melee", "baseball_bat", "starter_melee"],
+			"price": 45,
+			"loot_table_tier": 0,
+			"floor_loot_weights": {
+				"spawn_starter": 2.2,
+				"loot_floor_1_2": 1.6,
+				"scavenge_floor_1": 1.8,
+				"scavenge_floor_2": 1.2,
+				"combat_floor_1": 1.0,
+			},
+		},
+		{
+			"id": "weapon_greatblade",
+			"assembly_id": "bp_greatblade",
+			"name": "巨型工业断刃",
+			"description": "宽扇区三段重型挥砍。第三段过顶重劈伤害与击退显著提高。",
+			"type": "weapon",
+			"subtype": "melee_weapon",
+			"rarity": "uncommon",
+			"stack_max": 1,
+			"tags": ["weapon", "melee", "heavy_melee", "greatblade"],
+			"price": 165,
+			"loot_table_tier": 0,
+			"floor_loot_weights": {
+				"spawn_starter": 1.2,
+				"loot_floor_1_2": 0.75,
+				"loot_floor_3_4": 1.20,
+				"scavenge_floor_1": 0.65,
+				"scavenge_floor_2": 1.10,
+				"combat_floor_1": 0.50,
+				"combat_floor_2": 0.90,
+			},
+		},
+		{
+			"id": "weapon_waraxe",
+			"assembly_id": "bp_waraxe",
+			"name": "攻城裂甲斧",
+			"description": "高伤高击退的三段攻城斧。终结砸地前摇很长，但能重创正面目标。",
+			"type": "weapon",
+			"subtype": "melee_weapon",
+			"rarity": "rare",
+			"stack_max": 1,
+			"tags": ["weapon", "melee", "heavy_melee", "waraxe"],
+			"price": 240,
+			"loot_table_tier": 1,
+			"floor_loot_weights": {
+				"loot_floor_1_2": 0.18,
+				"loot_floor_3_4": 0.95,
+				"loot_floor_5": 1.45,
+				"loot_abyss": 1.80,
+				"scavenge_floor_3": 0.80,
+				"combat_floor_3": 0.72,
+				"elite_floor_1": 1.20,
+				"elite_floor_2": 1.80,
+			},
+		},
+	]
+	for weapon in weapons:
+		_items[weapon["id"]] = weapon
+
+func _register_gunbody_tier0() -> void:
+	# 基础枪身蓝图（Tier 0，初始可用）
+	var gun_bodies: Array = [
+		{
+			"id": "bp_pistol",
+			"name": "豌豆手枪蓝图碎片",
+			"description": "使用后解锁豌豆手枪蓝图，并获得 20 资源点",
+			"type": "blueprint",
+			"subtype": "gun_body",
+			"rarity": "common",
+			"stack_max": 99,
+			"tags": ["blueprint", "gun_body"],
+			"price": 50,
+			"loot_table_tier": 0,
+			"merchant_tier": 0,
+			"use_action": "unlock_blueprint",
+			"blueprint_category": "gunbody",
+			"blueprint_loot_tier": 0,
+			"extraction_points_reward": 20,
+			"floor_loot_weights": {
+				"loot_floor_1_2": 3.0,
+				"loot_floor_3_4": 2.5,
+				"loot_floor_5": 2.0,
+				"loot_abyss": 1.5,
+				"loot_common": 1.0,
+				"spawn_starter": 4.0,
+				"scavenge_floor_1": 2.5,
+				"scavenge_floor_2": 1.8,
+				"combat_floor_1": 1.5,
+				"combat_floor_2": 1.0,
+			},
+		},
+		{
+			"id": "bp_shotgun",
+			"name": "散射喷壶蓝图碎片",
+			"description": "使用后解锁散射喷壶蓝图，并获得 25 资源点",
+			"type": "blueprint",
+			"subtype": "gun_body",
+			"rarity": "common",
+			"stack_max": 99,
+			"tags": ["blueprint", "gun_body", "shotgun"],
+			"price": 60,
+			"loot_table_tier": 0,
+			"merchant_tier": 0,
+			"use_action": "unlock_blueprint",
+			"blueprint_category": "gunbody",
+			"blueprint_loot_tier": 0,
+			"extraction_points_reward": 25,
+			"floor_loot_weights": {
+				"loot_floor_1_2": 2.5,
+				"loot_floor_3_4": 2.0,
+				"loot_floor_5": 1.5,
+				"loot_abyss": 1.0,
+				"loot_common": 1.0,
+				"spawn_starter": 3.5,
+				"scavenge_floor_1": 2.0,
+				"scavenge_floor_2": 1.5,
+				"combat_floor_1": 1.0,
+				"combat_floor_2": 0.5,
+			},
+		},
+		{
+			"id": "bp_sprinkler",
+			"name": "花洒机枪蓝图碎片",
+			"description": "使用后解锁花洒机枪蓝图，并获得 20 资源点",
+			"type": "blueprint",
+			"subtype": "gun_body",
+			"rarity": "common",
+			"stack_max": 99,
+			"tags": ["blueprint", "gun_body", "auto"],
+			"price": 45,
+			"loot_table_tier": 0,
+			"merchant_tier": 0,
+			"use_action": "unlock_blueprint",
+			"blueprint_category": "gunbody",
+			"blueprint_loot_tier": 0,
+			"extraction_points_reward": 20,
+			"floor_loot_weights": {
+				"loot_floor_1_2": 2.0,
+				"loot_floor_3_4": 1.5,
+				"loot_floor_5": 1.0,
+				"loot_abyss": 0.75,
+				"loot_common": 1.0,
+				"spawn_starter": 2.0,
+				"scavenge_floor_1": 1.5,
+				"scavenge_floor_2": 1.0,
+				"combat_floor_1": 0.75,
+				"combat_floor_2": 0.5,
+			},
+		},
+		{
+			"id": "bp_starter_rifle",
+			"name": "初始步枪蓝图碎片",
+			"description": "使用后解锁初始步枪蓝图，并获得 20 资源点",
+			"type": "blueprint",
+			"subtype": "gun_body",
+			"rarity": "common",
+			"stack_max": 99,
+			"tags": ["blueprint", "gun_body", "rifle"],
+			"price": 45,
+			"loot_table_tier": 0,
+			"merchant_tier": 0,
+			"use_action": "unlock_blueprint",
+			"blueprint_category": "gunbody",
+			"blueprint_loot_tier": 0,
+			"extraction_points_reward": 20,
+			"floor_loot_weights": {
+				"loot_floor_1_2": 2.0,
+				"loot_floor_3_4": 1.5,
+				"loot_floor_5": 1.0,
+				"loot_abyss": 0.75,
+				"loot_common": 1.0,
+				"spawn_starter": 2.0,
+				"scavenge_floor_1": 1.5,
+				"scavenge_floor_2": 1.0,
+				"combat_floor_1": 0.75,
+				"combat_floor_2": 0.5,
+			},
+		},
+	]
+	for bp in gun_bodies:
+		_items[bp["id"]] = bp
+
+func _register_gunbody_tier1() -> void:
+	# 进阶枪身蓝图（Tier 1+，蓝图Tier >= 1 时可用）
+	var gun_bodies: Array = [
+		{
+			"id": "bp_rifle",
+			"name": "步枪蓝图碎片",
+			"description": "使用后解锁步枪蓝图，并获得 35 资源点",
+			"type": "blueprint",
+			"subtype": "gun_body",
+			"rarity": "uncommon",
+			"stack_max": 99,
+			"tags": ["blueprint", "gun_body", "rifle"],
+			"price": 80,
+			"loot_table_tier": 1,
+			"merchant_tier": 1,
+			"use_action": "unlock_blueprint",
+			"blueprint_category": "gunbody",
+			"blueprint_loot_tier": 1,
+			"extraction_points_reward": 35,
+			"floor_loot_weights": {
+				"loot_floor_3_4": 2.0,
+				"loot_floor_5": 2.5,
+				"loot_abyss": 3.0,
+				"boss_floor_1": 3.0,
+				"loot_common": 1.0,
+				"spawn_starter": 2.0,
+				"scavenge_floor_3": 1.5,
+				"scavenge_floor_4": 2.0,
+				"combat_floor_1": 1.5,
+				"combat_floor_2": 1.0,
+				"combat_floor_3": 0.8,
+			},
+		},
+		{
+			"id": "bp_machinegun",
+			"name": "蜂窝机枪蓝图碎片",
+			"description": "使用后解锁蜂窝机枪蓝图，并获得 40 资源点",
+			"type": "blueprint",
+			"subtype": "gun_body",
+			"rarity": "uncommon",
+			"stack_max": 99,
+			"tags": ["blueprint", "gun_body", "auto"],
+			"price": 90,
+			"loot_table_tier": 1,
+			"merchant_tier": 1,
+			"use_action": "unlock_blueprint",
+			"blueprint_category": "gunbody",
+			"blueprint_loot_tier": 1,
+			"extraction_points_reward": 40,
+			"floor_loot_weights": {
+				"loot_floor_3_4": 1.5,
+				"loot_floor_5": 2.0,
+				"loot_abyss": 2.5,
+				"scavenge_floor_3": 1.5,
+				"scavenge_floor_4": 2.0,
+				"scavenge_floor_5": 2.5,
+				"combat_floor_1": 0.8,
+				"combat_floor_2": 0.5,
+			},
+		},
+		{
+			"id": "bp_sniper",
+			"name": "弹弓狙击蓝图碎片",
+			"description": "使用后解锁弹弓狙击蓝图，并获得 50 资源点",
+			"type": "blueprint",
+			"subtype": "gun_body",
+			"rarity": "rare",
+			"stack_max": 99,
+			"tags": ["blueprint", "gun_body", "sniper"],
+			"price": 120,
+			"loot_table_tier": 2,
+			"merchant_tier": 2,
+			"use_action": "unlock_blueprint",
+			"blueprint_category": "gunbody",
+			"blueprint_loot_tier": 2,
+			"extraction_points_reward": 50,
+			"floor_loot_weights": {
+				"loot_floor_5": 2.0,
+				"loot_abyss": 3.0,
+				"boss_floor_1": 4.0,
+				"boss_floor_2": 5.0,
+				"scavenge_floor_5": 1.5,
+				"combat_floor_3": 1.5,
+				"combat_floor_4": 2.0,
+				"combat_floor_5": 2.5,
+				"loot_common": 0.5,
+				"spawn_starter": 1.0,
+			},
+		},
+		{
+			"id": "bp_launcher",
+			"name": "反胃榴弹筒蓝图碎片",
+			"description": "使用后解锁反胃榴弹筒蓝图，并获得 55 资源点",
+			"type": "blueprint",
+			"subtype": "gun_body",
+			"rarity": "rare",
+			"stack_max": 99,
+			"tags": ["blueprint", "gun_body", "launcher"],
+			"price": 130,
+			"loot_table_tier": 2,
+			"merchant_tier": 2,
+			"use_action": "unlock_blueprint",
+			"blueprint_category": "gunbody",
+			"blueprint_loot_tier": 2,
+			"extraction_points_reward": 55,
+			"floor_loot_weights": {
+				"loot_abyss": 2.5,
+				"boss_floor_1": 3.0,
+				"boss_floor_2": 4.0,
+				"scavenge_floor_5": 1.0,
+				"combat_floor_3": 0.5,
+				"combat_floor_4": 0.3,
+			},
+		},
+		{
+			"id": "bp_charge",
+			"name": "蓄力萝卜炮蓝图碎片",
+			"description": "使用后解锁蓄力萝卜炮蓝图，并获得 80 资源点",
+			"type": "blueprint",
+			"subtype": "gun_body",
+			"rarity": "epic",
+			"stack_max": 99,
+			"tags": ["blueprint", "gun_body", "charge"],
+			"price": 200,
+			"loot_table_tier": 3,
+			"merchant_tier": 3,
+			"use_action": "unlock_blueprint",
+			"blueprint_category": "gunbody",
+			"blueprint_loot_tier": 3,
+			"extraction_points_reward": 80,
+			"floor_loot_weights": {
+				"loot_abyss": 2.0,
+				"boss_floor_2": 4.0,
+				"scavenge_floor_5": 0.5,
+				"combat_floor_4": 0.5,
+				"combat_floor_5": 1.0,
+			},
+		},
+	]
+	for bp in gun_bodies:
+		_items[bp["id"]] = bp
+
+## 注册消耗品
+func _register_consumables() -> void:
+	var consumables: Array = [
+		{
+			"id": "item_health_potion",
+			"name": "治疗药水",
+			"description": "恢复 30 点生命值",
+			"type": "consumable",
+			"rarity": "common",
+			"stack_max": 5,
+			"tags": ["consumable", "healing"],
+			"use_action": "heal",
+			"heal_amount": 30,
+			"floor_loot_weights": {
+				"loot_common": 2.0,
+				"loot_floor_1_2": 2.0,
+				"loot_floor_3_4": 1.5,
+				"spawn_starter": 2.0,
+				"combat_floor_1": 1.5,
+				"combat_floor_2": 2.0,
+				"combat_floor_3": 1.0,
+			},
+			"price": 40,
+		},
+		{
+			"id": "item_ammo_pack",
+			"name": "通用弹药",
+			"description": "每个堆叠单位代表1发备弹；换弹按实际弹匣缺口消耗。",
+			"type": "consumable",
+			"rarity": "common",
+			"stack_max": 999,
+			"tags": ["consumable", "ammo"],
+			"use_action": "refill_ammo",
+			"floor_loot_weights": {
+				"loot_common": 1.5,
+				"loot_floor_1_2": 2.5,
+				"spawn_starter": 2.0,
+				"combat_floor_1": 2.0,
+				"combat_floor_2": 2.5,
+				"combat_floor_3": 2.0,
+				"combat_floor_4": 2.5,
+				"combat_floor_5": 2.0,
+			},
+			"price": 30,
+		},
+		{
+			"id": "item_battery_s",
+			"name": "小型电池",
+			"description": "恢复手电筒 25% 电量。",
+			"type": "consumable",
+			"subtype": "battery",
+			"rarity": "common",
+			"stack_max": 5,
+			"tags": ["consumable", "flashlight", "battery"],
+			"use_action": "restore_flashlight_charge",
+			"restore_amount": 0.25,
+			"floor_loot_weights": {
+				"loot_common": 2.0,
+				"loot_floor_1_2": 2.5,
+				"spawn_starter": 2.0,
+				"combat_floor_1": 1.5,
+				"combat_floor_2": 1.5,
+				"combat_floor_3": 1.5,
+				"combat_floor_4": 1.5,
+				"combat_floor_5": 1.5,
+			},
+			"price": 25,
+			"merchant_tier": 1,
+		},
+		{
+			"id": "item_battery_l",
+			"name": "大型电池",
+			"description": "恢复手电筒 75% 电量。中深层掉落或精英包。",
+			"type": "consumable",
+			"rarity": "uncommon",
+			"stack_max": 5,
+			"tags": ["consumable", "flashlight", "battery"],
+			"use_action": "restore_flashlight_charge",
+			"restore_amount": 0.75,
+			"floor_loot_weights": {
+				"loot_floor_3_4": 1.2,
+				"scavenge_floor_3": 1.0,
+				"scavenge_floor_4": 1.0,
+				"scavenge_floor_5": 1.0,
+				"elite_floor_1": 0.8,
+				"elite_floor_2": 0.8,
+				"boss_floor_1": 1.5,
+			},
+			"price": 60,
+			"merchant_tier": 0,
+		},
+		{
+			"id": "item_cell_pack",
+			"name": "电芯包",
+			"description": "完全充满手电筒。稀有掉落。",
+			"type": "consumable",
+			"rarity": "rare",
+			"stack_max": 3,
+			"tags": ["consumable", "flashlight", "battery"],
+			"use_action": "restore_flashlight_charge",
+			"restore_amount": 1.0,
+			"floor_loot_weights": {
+				"loot_floor_5": 0.6,
+				"loot_abyss": 1.0,
+				"boss_floor_2": 1.5,
+			},
+			"price": 120,
+			"merchant_tier": 0,
+		},
+	]
+	for c in consumables:
+		_items[c["id"]] = c
+
+
+## 注册手电筒模块(基地工坊装备 / 精英掉落解锁)
+func _register_flashlight_modules() -> void:
+	var modules: Array = [
+		{
+			"id": "item_flashlight_basic",
+			"module_id": "basic",
+			"name": "基础模块",
+			"description": "默认手电筒模块。耗电 1.00×，揭示 1.00×。",
+			"type": "module",
+			"subtype": "flashlight_module",
+			"rarity": "common",
+			"stack_max": 1,
+			"tags": ["module", "flashlight_module", "basic"],
+			"use_action": "equip_flashlight_module",
+			"price": 0,
+		},
+		{
+			"id": "item_flashlight_advanced",
+			"module_id": "advanced",
+			"name": "加强模块",
+			"description": "耗电 0.7143×，揭示 1.20×。蓝图解锁后工坊可选。",
+			"type": "module",
+			"subtype": "flashlight_module",
+			"rarity": "uncommon",
+			"stack_max": 1,
+			"tags": ["module", "flashlight_module", "advanced"],
+			"use_action": "equip_flashlight_module",
+			"price": 0,
+			"blueprint_unlock_tier": 1,
+			"floor_loot_weights": {
+				"blueprint_attachment_unlock": 1.0,
+			},
+		},
+		{
+			"id": "item_flashlight_efficient",
+			"module_id": "efficient",
+			"name": "节能模块",
+			"description": "耗电 0.50×，范围/揭示 0.85×。带回99F安装后永久解锁。",
+			"type": "module",
+			"subtype": "flashlight_module",
+			"rarity": "rare",
+			"stack_max": 1,
+			"tags": ["module", "flashlight_module", "efficient"],
+			"use_action": "equip_flashlight_module",
+			"price": 0,
+			"floor_loot_weights": {
+				"elite_floor_1": 0.6,
+				"elite_floor_2": 0.8,
+				"boss_floor_2": 1.0,
+			},
+		},
+	]
+	for m in modules:
+		_items[m["id"]] = m
+
+func _register_bullet_tier0() -> void:
+	var bullets: Array = [
+		{
+			"id": "mod_bullet_standard",
+			"name": "标准子弹模块",
+			"type": "module",
+			"subtype": "bullet",
+			"rarity": "common",
+			"stack_max": 10,
+			"tags": ["module", "bullet"],
+			"price": 30,
+			"loot_table_tier": 0,
+					"merchant_tier": 0,
+			"floor_loot_weights": {
+				"loot_floor_1_2": 3.0,
+				"loot_floor_3_4": 2.5,
+				"loot_floor_5": 2.0,
+				"loot_abyss": 1.5,
+				"spawn_starter": 3.0,
+				"scavenge_floor_1": 3.0,
+				"scavenge_floor_2": 2.5,
+				"combat_floor_1": 3.0,
+				"combat_floor_2": 2.5,
+			},
+		},
+		{
+			"id": "mod_bullet_sticky",
+			"name": "黏黏弹模块",
+			"type": "module",
+			"subtype": "bullet",
+			"rarity": "uncommon",
+			"stack_max": 10,
+			"tags": ["module", "bullet", "sticky"],
+			"price": 50,
+			"loot_table_tier": 0,
+					"merchant_tier": 1,
+			"floor_loot_weights": {
+				"loot_floor_1_2": 2.0,
+				"loot_floor_3_4": 2.5,
+				"loot_floor_5": 2.0,
+				"loot_abyss": 1.5,
+				"spawn_starter": 2.0,
+				"scavenge_floor_1": 2.0,
+				"scavenge_floor_2": 2.5,
+				"combat_floor_1": 2.0,
+				"combat_floor_2": 2.5,
+			},
+		},
+		{
+			"id": "mod_bullet_bounce",
+			"name": "回旋镖弹模块",
+			"type": "module",
+			"subtype": "bullet",
+			"rarity": "uncommon",
+			"stack_max": 10,
+			"tags": ["module", "bullet", "bounce"],
+			"price": 60,
+			"loot_table_tier": 0,
+					"merchant_tier": 1,
+			"floor_loot_weights": {
+				"loot_floor_1_2": 1.5,
+				"loot_floor_3_4": 2.0,
+				"loot_floor_5": 2.5,
+				"loot_abyss": 2.0,
+				"spawn_starter": 1.5,
+				"scavenge_floor_1": 1.5,
+				"scavenge_floor_2": 2.0,
+				"combat_floor_1": 1.5,
+				"combat_floor_2": 2.0,
+			},
+		},
+	]
+	for b in bullets:
+		_items[b["id"]] = b
+
+func _register_bullet_tier1() -> void:
+	var bullets: Array = [
+		{
+			"id": "mod_bullet_piercing",
+			"name": "穿甲弹模块",
+			"type": "module",
+			"subtype": "bullet",
+			"rarity": "rare",
+			"stack_max": 10,
+			"tags": ["module", "bullet", "piercing"],
+			"price": 80,
+			"loot_table_tier": 1,
+					"merchant_tier": 2,
+			"floor_loot_weights": {
+				"loot_floor_3_4": 2.0,
+				"loot_floor_5": 2.5,
+				"loot_abyss": 3.0,
+				"scavenge_floor_3": 2.0,
+				"scavenge_floor_4": 2.5,
+				"scavenge_floor_5": 3.0,
+				"combat_floor_3": 1.5,
+			},
+		},
+		{
+			"id": "mod_bullet_explosive",
+			"name": "爆炸弹模块",
+			"type": "module",
+			"subtype": "bullet",
+			"rarity": "rare",
+			"stack_max": 10,
+			"tags": ["module", "bullet", "explosive"],
+			"price": 100,
+			"loot_table_tier": 1,
+					"merchant_tier": 2,
+			"floor_loot_weights": {
+				"loot_floor_3_4": 1.5,
+				"loot_floor_5": 2.0,
+				"loot_abyss": 2.5,
+				"scavenge_floor_3": 1.5,
+				"scavenge_floor_4": 2.0,
+				"scavenge_floor_5": 2.5,
+				"combat_floor_3": 1.0,
+			},
+		},
+		{
+			"id": "mod_bullet_homing",
+			"name": "蜂卵弹模块",
+			"type": "module",
+			"subtype": "bullet",
+			"rarity": "epic",
+			"stack_max": 10,
+			"tags": ["module", "bullet", "homing", "summon"],
+			"price": 150,
+			"loot_table_tier": 2,
+					"merchant_tier": 3,
+			"floor_loot_weights": {
+				"loot_floor_5": 2.0,
+				"loot_abyss": 3.0,
+				"boss_floor_1": 4.0,
+				"scavenge_floor_4": 2.0,
+				"scavenge_floor_5": 3.0,
+				"combat_floor_4": 1.5,
+				"combat_floor_5": 2.5,
+			},
+		},
+		{
+			"id": "mod_bullet_blackhole",
+			"name": "黑洞弹模块",
+			"type": "module",
+			"subtype": "bullet",
+			"rarity": "epic",
+			"stack_max": 10,
+			"tags": ["module", "bullet", "blackhole", "pull"],
+			"price": 180,
+			"loot_table_tier": 2,
+					"merchant_tier": 3,
+			"floor_loot_weights": {
+				"loot_abyss": 2.5,
+				"boss_floor_1": 3.0,
+				"boss_floor_2": 4.0,
+				"scavenge_floor_4": 2.5,
+				"scavenge_floor_5": 4.0,
+				"combat_floor_4": 2.0,
+				"combat_floor_5": 3.0,
+			},
+		},
+		{
+			"id": "mod_bullet_balloon",
+			"name": "气球弹模块",
+			"type": "module",
+			"subtype": "bullet",
+			"rarity": "rare",
+			"stack_max": 10,
+			"tags": ["module", "bullet", "balloon", "slow"],
+			"price": 90,
+			"loot_table_tier": 1,
+					"merchant_tier": 2,
+			"floor_loot_weights": {
+				"loot_floor_3_4": 1.5,
+				"loot_floor_5": 2.0,
+				"loot_abyss": 2.0,
+				"scavenge_floor_3": 1.5,
+				"scavenge_floor_4": 2.0,
+				"scavenge_floor_5": 2.0,
+				"combat_floor_3": 1.0,
+				"combat_floor_4": 1.5,
+			},
+		},
+	]
+	for b in bullets:
+		_items[b["id"]] = b
+
+func _register_attachment_tier0() -> void:
+	var attachments: Array = [
+		{
+			"id": "attach_triple_muzzle",
+			"name": "三叉枪口",
+			"type": "attachment",
+			"subtype": "muzzle",
+			"rarity": "uncommon",
+			"stack_max": 5,
+			"tags": ["attachment", "muzzle", "multi_shot"],
+			"price": 70,
+			"loot_table_tier": 0,
+					"merchant_tier": 1,
+			"floor_loot_weights": {
+				"loot_floor_1_2": 2.5,
+				"loot_floor_3_4": 2.0,
+				"loot_floor_5": 1.5,
+				"loot_abyss": 1.0,
+				"spawn_starter": 2.5,
+				"scavenge_floor_1": 2.5,
+				"scavenge_floor_2": 2.0,
+				"scavenge_floor_3": 1.5,
+				"scavenge_floor_4": 1.0,
+				"combat_floor_1": 2.0,
+				"combat_floor_2": 1.5,
+			},
+		},
+		{
+			"id": "attach_rubber_stock",
+			"name": "橡皮枪托",
+			"type": "attachment",
+			"subtype": "stock",
+			"rarity": "common",
+			"stack_max": 5,
+			"tags": ["attachment", "stock", "bounce"],
+			"price": 45,
+			"loot_table_tier": 0,
+					"merchant_tier": 0,
+			"floor_loot_weights": {
+				"loot_floor_1_2": 3.0,
+				"loot_floor_3_4": 2.5,
+				"loot_floor_5": 2.0,
+				"loot_abyss": 1.5,
+				"spawn_starter": 3.0,
+				"scavenge_floor_1": 3.0,
+				"scavenge_floor_2": 2.5,
+				"scavenge_floor_3": 2.0,
+				"scavenge_floor_4": 1.5,
+				"combat_floor_1": 2.5,
+				"combat_floor_2": 2.0,
+			},
+		},
+	]
+	for a in attachments:
+		_items[a["id"]] = a
+
+func _register_attachment_tier1() -> void:
+	var attachments: Array = [
+		{
+			"id": "attach_scope",
+			"name": "放大镜瞄具",
+			"type": "attachment",
+			"subtype": "scope",
+			"rarity": "rare",
+			"stack_max": 5,
+			"tags": ["attachment", "scope", "crit"],
+			"price": 100,
+			"loot_table_tier": 1,
+					"merchant_tier": 2,
+			"floor_loot_weights": {
+				"loot_floor_3_4": 2.0,
+				"loot_floor_5": 2.5,
+				"loot_abyss": 3.0,
+				"scavenge_floor_3": 2.0,
+				"scavenge_floor_4": 2.5,
+				"scavenge_floor_5": 3.0,
+				"combat_floor_2": 1.5,
+				"combat_floor_3": 2.5,
+			},
+		},
+		{
+			"id": "attach_big_mag",
+			"name": "肉质弹匣",
+			"type": "attachment",
+			"subtype": "magazine",
+			"rarity": "uncommon",
+			"stack_max": 5,
+			"tags": ["attachment", "magazine", "heal"],
+			"price": 80,
+			"loot_table_tier": 1,
+					"merchant_tier": 1,
+			"floor_loot_weights": {
+				"loot_floor_3_4": 2.0,
+				"loot_floor_5": 2.5,
+				"loot_abyss": 2.0,
+				"scavenge_floor_3": 2.0,
+				"scavenge_floor_4": 2.5,
+				"scavenge_floor_5": 2.0,
+				"combat_floor_1": 2.5,
+				"combat_floor_2": 3.0,
+			},
+		},
+		{
+			"id": "attach_fan",
+			"name": "小风扇",
+			"type": "attachment",
+			"subtype": "external",
+			"rarity": "epic",
+			"stack_max": 3,
+			"tags": ["attachment", "external", "pull"],
+			"price": 150,
+			"loot_table_tier": 2,
+					"merchant_tier": 3,
+			"floor_loot_weights": {
+				"loot_floor_5": 2.0,
+				"loot_abyss": 2.5,
+				"boss_floor_1": 3.0,
+				"scavenge_floor_4": 2.0,
+				"scavenge_floor_5": 2.5,
+				"combat_floor_3": 1.5,
+				"combat_floor_4": 2.0,
+				"combat_floor_5": 2.5,
+			},
+		},
+		{
+			"id": "attach_copy_sticker",
+			"name": "复制贴纸",
+			"type": "attachment",
+			"subtype": "mutator",
+			"rarity": "epic",
+			"stack_max": 3,
+			"tags": ["attachment", "mutator", "copy"],
+			"price": 200,
+			"loot_table_tier": 2,
+					"merchant_tier": 3,
+			"floor_loot_weights": {
+				"loot_abyss": 2.0,
+				"boss_floor_1": 3.0,
+				"boss_floor_2": 4.0,
+				"scavenge_floor_4": 2.0,
+				"scavenge_floor_5": 3.0,
+				"combat_floor_3": 1.0,
+				"combat_floor_4": 1.5,
+				"combat_floor_5": 2.0,
+			},
+		},
+	]
+	for a in attachments:
+		_items[a["id"]] = a
+
+## 检查物品是否存在
+func has_item(item_id: String) -> bool:
+	return _items.has(item_id)
+
+## 获取所有物品列表
+func get_all_items() -> Array[Dictionary]:
+	var result: Array[Dictionary] = []
+	for item in _items.values():
+		if item is Dictionary:
+			result.append((item as Dictionary).duplicate(true))
+	return result
+
+## 按类型获取物品
+func get_items_by_type(item_type: String) -> Array[Dictionary]:
+	var result: Array[Dictionary] = []
+	for item in _items.values():
+		if item.get("type") == item_type:
+			result.append(item)
+	return result
+
+## 按标签获取物品
+func get_items_by_tag(tag: String) -> Array[Dictionary]:
+	var result: Array[Dictionary] = []
+	for item in _items.values():
+		if tag in item.get("tags", []):
+			result.append(item)
+	return result
+
+## 获取掉落池（根据掉落表名称返回一组物品）
+func get_loot_table(table_name: String) -> Array[Dictionary]:
+	var result: Array[Dictionary] = []
+	for item in _items.values():
+		var weights: Dictionary = item.get("floor_loot_weights", {})
+		if weights.has(table_name):
+			# 复制物品定义并附加权重
+			var entry: Dictionary = item.duplicate()
+			entry["loot_weight"] = weights[table_name]
+			result.append(entry)
+	return result
+
+func get_item(item_id: String) -> Dictionary:
+	if not _items.has(item_id):
+		return {}
+	return (_items[item_id] as Dictionary).duplicate(true)
+
+## 获取商人商品（根据层级）
+func get_merchant_goods(tier: int) -> Array[Dictionary]:
+	var result: Array[Dictionary] = []
+	for item in _items.values():
+		if item.get("merchant_tier", 0) <= tier and item.get("price", 0) > 0:
+			result.append(item.duplicate())
+	return result
+
+
+func get_base_shop_goods() -> Array[Dictionary]:
+	var result: Array[Dictionary] = []
+	for item in _items.values():
+		if not item is Dictionary:
+			continue
+		var definition := item as Dictionary
+		if not bool(definition.get("base_shop_enabled", false)):
+			continue
+		if int(definition.get("base_buy_price", 0)) <= 0:
+			continue
+		result.append(definition.duplicate(true))
+	result.sort_custom(func(a: Dictionary, b: Dictionary) -> bool:
+		return int(a.get("base_shelf_order", 0)) < int(b.get("base_shelf_order", 0))
+	)
+	return result
+
+## 调试：打印注册的所有物品
+func debug_list_all() -> String:
+	var lines: Array[String] = ["ItemRegistry [%d items]" % _items.size()]
+	for item in _items.values():
+		lines.append("  [%s] %s (%s)" % [item["id"], item["name"], item.get("rarity", "?")])
+	return "\n".join(lines)

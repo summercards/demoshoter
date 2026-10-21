@@ -1,0 +1,1397 @@
+class_name WeaponModel3D
+extends Node3D
+## 现有 BlueprintRegistry 的 3D 表现与射击适配层。目录、数值和 56 组枪弹组合仍只有一份来源。
+
+signal shot_fired(projectile_count: int)
+signal projectile_spawned(projectile: Projectile3D)
+signal ammo_changed(current: int, maximum: int)
+signal loadout_changed(gun_id: String, bullet_id: String)
+signal reload_started(duration: float)
+signal reload_progress_changed(progress: float, remaining: float)
+signal reload_ended(completed: bool)
+
+const PROJECTILE_SCRIPT := preload("res://src/combat3d/Projectile3D.gd")
+const EFFECT_SCENE: PackedScene = preload("res://assets/art/vfx/combat_3d/vfx_combat_kit_root_top3d.tscn")
+## 枪口花火视觉体积基准（业主 2026-09-21 观感定档：取 v002 基准的 80%）。
+## 口径：effect_size 线性作用于特效视觉体积，并同时线性作用于 MuzzleLight 范围（3.5m → 2.8m）；
+## 灯能量为固定常量，不随尺寸缩放。
+const MUZZLE_FLASH_EFFECT_SIZE := 0.8
+## 弹壳视觉尺寸（业主 2026-09-22 观感定档：缩到原基准的 80% = 0.8）。
+## 口径：该值线性作用于弹壳三件（壳体/底缘/底火）的缩放，也同步决定贴地高度
+## （VfxShellCasing3D 的实际半径 = SHELL_BASE_RADIUS × 此值）⇒ 缩小后仍精确贴地不浮空。
+const SHELL_CASING_SIZE := 0.8
+const SHELL_CASING_COLOR := Color(0.92, 0.56, 0.16)
+
+## —— 抛壳随机化（业主 2026-09-22 观感定档：「不然太整齐了」）——
+##
+## 每一发弹壳的**方向 / 高度 / 前送 / 自旋 / 初始姿态**逐发独立扰动，落地散布随之自然散开。
+## 全部按**枪械局部基**（right / up / forward）施加 ⇒ 与枪当前朝向无关，
+## 扰动的永远是「相对抛壳窗」的手感，不会因为玩家转身而变味。
+##
+## 基准速度沿用上一版的固定值（保持同一手感中心，只把「点」摊成「一团」）：
+##   right 2.1 / up 1.55 / forward 0.22 m/s，自旋 20 rad/s
+## 抖动口径（randf_range 均匀分布，每次开火独立抽样）：
+##   右向速度 = SHELL_EJECT_RIGHT_SPEED   × randf_range(1 - RIGHT_SPREAD, 1 + RIGHT_SPREAD)
+##   抬升速度 = SHELL_EJECT_UP_SPEED      × randf_range(1 - UP_SPREAD,    1 + UP_SPREAD)
+##   前送速度 = SHELL_EJECT_FORWARD_JITTER × randf_range(-1, 1)   ← 绝对值抖动，可为负 ⇒ 也会落在枪身后方
+##   自旋速度 = SHELL_EJECT_SPIN_SPEED    × randf_range(1 - SPIN_SPREAD,  1 + SPIN_SPREAD)
+##   自旋轴   = (right + up × randf_range(0.1, 0.9) + forward × randf_range(-0.4, 0.4)).normalized()
+##   初始姿态 = 绕随机单位轴旋转 randf_range(-1, 1) × SHELL_INITIAL_TILT_DEG
+##
+## 推算的落地散布（重力 9.8、两次弹跳后切向摩擦 0.42² ⇒ 滚动段位移可忽略）：
+##   水平初速 ∈ [1.37, 2.84] m/s ⇒ 首次触地前位移 ≈ v·0.6s ⇒ 落点离枪 ≈ 0.9 ~ 2.5 m ⇒ 散布带 ≈ 1.6 m。
+##
+## ⛔ RIGHT_SPREAD 有硬上限：验收断言「弹壳从枪械右侧抛出」= 右向速度 > 1.0，
+##    即 SHELL_EJECT_RIGHT_SPEED × (1 - RIGHT_SPREAD) > 1.0 ⇒ RIGHT_SPREAD < 0.523。
+##    取 0.35 留 0.35 m/s 余量。调大这三个幅度常量请同步跑
+##    tests/verification/verify_combat_vfx_toon_v002.gd（`_check_shell_ejection_randomized` 钉住了它们）。
+const SHELL_EJECT_RIGHT_SPEED := 2.1
+const SHELL_EJECT_UP_SPEED := 1.55
+const SHELL_EJECT_SPIN_SPEED := 20.0
+const SHELL_EJECT_RIGHT_SPREAD := 0.35
+const SHELL_EJECT_UP_SPREAD := 0.45
+## 前送量基准很小（0.22 m/s），按比例抖动摇不出差别 ⇒ 直接给绝对值 ±，且允许为负（落到枪身后方）。
+const SHELL_EJECT_FORWARD_JITTER := 0.30
+const SHELL_EJECT_SPIN_SPREAD := 0.50
+## 初始姿态随机倾角上限（度）。> 45° 会像「被人乱扔」而不是「从抛壳窗崩出来」。
+const SHELL_INITIAL_TILT_DEG := 45.0
+const MELEE_VISUAL_SCENES := {
+	"bp_baseball_bat": preload("res://assets/art/items_weapons/weapons/melee_baseball_bat/runtime/wpn_melee_baseball_bat_ground_root_top3d.tscn"),
+	"bp_greatblade": preload("res://assets/art/items_weapons/weapons/melee_greatblade/runtime/wpn_melee_greatblade_ground_root_top3d.tscn"),
+	"bp_waraxe": preload("res://assets/art/items_weapons/weapons/melee_waraxe/runtime/wpn_melee_waraxe_ground_root_top3d.tscn"),
+}
+const AUTHORED_ATTACHMENT_SCENES := {
+	"Att_Fan": preload("res://assets/art/items_weapons/weapons/attachment_fan/runtime/wpn_attachment_fan_ground_root_top3d.tscn"),
+	"Att_CopySticker": preload("res://assets/art/items_weapons/weapons/copy_sticker/runtime/wpn_copy_sticker_ground_root_top3d.tscn"),
+}
+const GUN_VISUAL_SCENES := {
+	"bp_pistol": preload("res://assets/art/weapons/weapon_3d/runtime/hair_dryer/wpn_hair_dryer_root_top3d_v001.tscn"),
+	"bp_shotgun": preload("res://assets/art/weapons/weapon_3d/runtime/double_barrel_cannon/wpn_double_barrel_cannon_root_top3d_v001.tscn"),
+	"bp_rifle": preload("res://assets/art/weapons/weapon_3d/runtime/broom_rifle/wpn_broom_rifle_root_top3d_v001.tscn"),
+	"bp_machinegun": preload("res://assets/art/weapons/weapon_3d/runtime/water_tank_blaster/wpn_water_tank_blaster_root_top3d.tscn"),
+	# 花洒机枪是蜂窝机枪的出厂型号，共用同一份正式美术资产；它的独立身份
+	# 靠 assembly/bp ID 区分，不复制 GLB。
+	"bp_sprinkler": preload("res://assets/art/weapons/weapon_3d/runtime/water_tank_blaster/wpn_water_tank_blaster_root_top3d.tscn"),
+	# 初始步枪以步枪为原型，同样复用步枪的正式美术资产，不复制 GLB。
+	"bp_starter_rifle": preload("res://assets/art/weapons/weapon_3d/runtime/broom_rifle/wpn_broom_rifle_root_top3d_v001.tscn"),
+	"bp_sniper": preload("res://assets/art/weapons/weapon_3d/runtime/candy_sniper/wpn_candy_sniper_root_top3d_v001.tscn"),
+	"bp_launcher": preload("res://assets/art/weapons/weapon_3d/runtime/toaster_launcher/wpn_toaster_launcher_root_top3d_v001.tscn"),
+	"bp_charge": preload("res://assets/art/weapons/weapon_3d/runtime/gumball_cannon/wpn_gumball_cannon_root_top3d_v001.tscn"),
+}
+
+const GUN_PROFILES := {
+	"bp_pistol": {"length": 0.72, "barrel": 0.32, "width": 0.18, "height": 0.22, "color": Color(0.28, 0.34, 0.34)},
+	"bp_shotgun": {"length": 1.02, "barrel": 0.78, "width": 0.25, "height": 0.25, "color": Color(0.36, 0.25, 0.16)},
+	"bp_rifle": {"length": 1.10, "barrel": 0.62, "width": 0.21, "height": 0.24, "color": Color(0.20, 0.30, 0.27)},
+	"bp_machinegun": {"length": 1.18, "barrel": 0.58, "width": 0.31, "height": 0.30, "color": Color(0.27, 0.29, 0.20)},
+	"bp_sprinkler": {"length": 1.18, "barrel": 0.58, "width": 0.31, "height": 0.30, "color": Color(0.27, 0.29, 0.20)},
+	"bp_starter_rifle": {"length": 1.10, "barrel": 0.62, "width": 0.21, "height": 0.24, "color": Color(0.24, 0.30, 0.22)},
+	"bp_sniper": {"length": 1.30, "barrel": 1.02, "width": 0.19, "height": 0.22, "color": Color(0.18, 0.24, 0.30)},
+	"bp_launcher": {"length": 1.08, "barrel": 0.72, "width": 0.38, "height": 0.36, "color": Color(0.30, 0.22, 0.16)},
+	"bp_charge": {"length": 1.12, "barrel": 0.62, "width": 0.32, "height": 0.34, "color": Color(0.28, 0.18, 0.34)},
+}
+
+const BULLET_COLORS := {
+	"mod_bullet_standard": Color(0.76, 0.86, 0.92),
+	"mod_bullet_sticky": Color(0.32, 0.92, 0.62),
+	"mod_bullet_bounce": Color(0.30, 0.70, 1.0),
+	"mod_bullet_piercing": Color(1.0, 0.78, 0.22),
+	"mod_bullet_explosive": Color(1.0, 0.28, 0.08),
+	"mod_bullet_homing": Color(0.50, 1.0, 0.42),
+	"mod_bullet_blackhole": Color(0.68, 0.25, 0.95),
+	"mod_bullet_balloon": Color(0.98, 0.35, 0.72),
+}
+
+## 枪族弹体几何档位（2026-10-14 业主：「每把枪的子弹大小要做出区分」）。
+## 键 = 枪身 tags 里的族标识（**不是 gun_id** —— 按族声明，新增同族枪自动继承，
+## 避免逐 id 硬编码随枪数增长而腐烂；同见 _apply_gun_behavior_tags 的历史包袱）。
+## 每条三档：
+##   scale          —— 各向同性尺寸倍率（1.0 = 与弹种 profile 基准一致）
+##   axial          —— 沿飞行轴拉长倍率（>1 变长；只拉长不增粗 ⇒ 细长观感）
+##   grow_from      —— 出生瞬间的尺寸比例（<1 才有「由小变大」的过程动画）
+##   grow_duration  —— 从 grow_from 线性长到 1.0 所需秒数（grow_from=1.0 时无意义）
+## 未命中任何族的枪回落 BULLET_GEOMETRY_NEUTRAL。取值理由见 14.6 §3.7。
+const BULLET_GEOMETRY_NEUTRAL := {
+	"scale": 1.0,
+	"axial": 1.0,
+	"grow_from": 1.0,
+	"grow_duration": 0.0,
+}
+
+const BULLET_GEOMETRY_BY_GUN_TAG := {
+	# 散射喷壶：一次 5 发散射，弹丸出生 42% 并在 0.30s 内长满 —— 打出「散开后铺开」的过程感。
+	# 2026-10-14 业主「子弹太小了，出生和结束都增加 2 倍」⇒ 整体 ×2。grow_from 是**比例**，
+	# 保持 0.42 即出生与长满两端同步翻倍（出生 0.42→0.84、长满 1.0→2.0），比例关系不变。
+	"shotgun": {"scale": 2.0, "axial": 1.0, "grow_from": 0.42, "grow_duration": 0.30},
+	# 反胃榴弹筒：重型弹药，整体放大到 1.55 倍（不拉长，保持圆钝的榴弹观感）。
+	"launcher": {"scale": 1.55, "axial": 1.0, "grow_from": 1.0, "grow_duration": 0.0},
+	# 弹弓狙击：轴向拉到 2.0 倍、横向收到 0.95 —— 细长锐利的狙击弹观感（净长度 1.90 倍）。
+	"sniper": {"scale": 0.95, "axial": 2.0, "grow_from": 1.0, "grow_duration": 0.0},
+}
+
+## 命运体型是相对当前挂点基础尺寸的倍率，不是旧资产空间中的绝对 scale。
+## 当前角色挂点随 entity_size_baseline_v2 继承旧资产 70%，所以命运 2.0
+## 的最终尺寸等于“新版 100% × 2”，即旧资产的 140%。
+const DEFAULT_FATE_VISUAL_MULTIPLIER := 1.0
+
+@export var gun_id := "bp_pistol"
+@export var bullet_id := "mod_bullet_standard"
+@export var display_only := false
+@export_flags_3d_render var render_layers := 1
+
+var damage := 20
+var fire_rate := 3.5
+var projectile_count := 1
+var spread := 0.03
+var reload_time := 1.5
+## Character-authored reload owns the held weapon pose; retain recoil independently.
+var character_authored_reload := false
+var magazine_size := 12
+var current_ammo := 12
+var bullet_speed := 24.0
+## 射程上限（米），来自枪身 base_stats 的 `range`。与 `bullet_speed` 独立：
+## 弹速只决定飞行时间，射程决定弹体最远能飞多远、到点消失（爆炸弹则自动引爆）。
+## `0` = 未声明，退回「按存活时间」的旧口径（敌弹与未升级内容不受影响）。
+var range_m := 0.0
+var bullet_tags: Array[String] = []
+## 当前枪身的弹体几何档位（由枪身 tags 解析，随每次开火下发到 Projectile3D）。
+var bullet_geometry: Dictionary = BULLET_GEOMETRY_NEUTRAL.duplicate()
+var bullet_color := Color(0.76, 0.86, 0.92)
+var damage_multiplier := 1.0
+var charge_time := 0.0
+var weapon_kind := "ranged"
+var _melee_profile: Dictionary = {}
+var _base_damage := 20
+var _copy_chance := 0.0
+var _critical_chance := 0.10
+var _critical_damage_multiplier := 1.5
+var _projectile_behavior: Dictionary = {}
+var _secondary_guns: Array[Dictionary] = []
+var _source_tree: WeaponAssemblyTree
+var _fire_sequence := 0
+var _reload_first_shot := false
+var _pending_copy_waves: Array[Dictionary] = []
+var _pending_secondary_shots: Array[Dictionary] = []
+var _secondary_rate_remainder := 0.0
+
+var _cooldown := 0.0
+var _reload_remaining := 0.0
+var _active_reload_duration := 0.0
+var _reload_ammo_provider: Callable
+var _recoil := 0.0
+var _charge_active := false
+var _charge_elapsed := 0.0
+var _charge_aim := Vector3.FORWARD
+var _charge_shooter: Node3D
+var _visual_root: Node3D
+var _muzzle: Marker3D
+var _ejection: Marker3D
+var _fate_visual_multiplier := DEFAULT_FATE_VISUAL_MULTIPLIER
+# 池引用缓存（零视觉损失）：投射物池与全局 VFX 池在整个战局里都是单例。
+# `get_nodes_in_group` 每次调用都会新建一个数组；散弹一颗弹丸一次调用，高射速下
+# 是每发都在发生的分配。首次解析后缓存，实例失效再重解析。
+var _projectile_pool_cache: ProjectilePool3D
+var _vfx_pool_cache: VfxPool3D
+
+const GUN_NAME_TO_ID := {
+	"GunBody_Pistol": "bp_pistol", "GunBody_Shotgun": "bp_shotgun",
+	"GunBody_Rifle": "bp_rifle", "GunBody_Machinegun": "bp_machinegun",
+	"GunBody_Sprinkler": "bp_sprinkler",
+	"GunBody_StarterRifle": "bp_starter_rifle",
+	"GunBody_Sniper": "bp_sniper", "GunBody_Launcher": "bp_launcher",
+	"GunBody_Charge": "bp_charge",
+	"Melee_BaseballBat": "bp_baseball_bat",
+	"Melee_Greatblade": "bp_greatblade",
+	"Melee_Waraxe": "bp_waraxe",
+}
+const BULLET_NAME_TO_ID := {
+	"Bullet_Standard": "mod_bullet_standard", "Bullet_Sticky": "mod_bullet_sticky",
+	"Bullet_Bounce": "mod_bullet_bounce", "Bullet_Piercing": "mod_bullet_piercing",
+	"Bullet_Explosive": "mod_bullet_explosive", "Bullet_Homing": "mod_bullet_homing",
+	"Bullet_Blackhole": "mod_bullet_blackhole", "Bullet_Balloon": "mod_bullet_balloon",
+}
+
+
+func _ready() -> void:
+	var weapon_item: Variant = get_meta("weapon_item_data", {})
+	if display_only and weapon_item is Dictionary and not (weapon_item as Dictionary).is_empty():
+		var instance := WeaponInstance.from_item(weapon_item as Dictionary)
+		var preview_tree := instance.build_runtime_tree() if instance != null else null
+		if preview_tree != null:
+			preview_tree.name = "PreviewAssemblyTree"
+			add_child(preview_tree)
+			configure_from_tree(preview_tree)
+			return
+	if not gun_id.is_empty():
+		configure(gun_id, bullet_id)
+
+
+var _fate_mounts: Array[Dictionary] = []
+var _mount_pulse := 0.0
+var _mounted_melee_time := 0.0
+
+func _process(delta: float) -> void:
+	_mount_pulse = maxf(0.0, _mount_pulse - delta)
+	_update_fate_mounts()
+	_mounted_melee_time = maxf(0.0, _mounted_melee_time - delta)
+	for index in range(_pending_secondary_shots.size() - 1, -1, -1):
+		var shot := _pending_secondary_shots[index]
+		shot["remaining"] = float(shot["remaining"]) - delta
+		if float(shot["remaining"]) <= 0.0:
+			_pending_secondary_shots.remove_at(index)
+			if is_instance_valid(shot["shooter"]) and is_instance_valid(shot["world"]) and shot["source"] == _source_tree:
+				_fire_secondary_gun(shot["world"], shot["shooter"], shot["direction"], shot["secondary"])
+	for index in range(_pending_copy_waves.size() - 1, -1, -1):
+		var wave := _pending_copy_waves[index]
+		wave["remaining"] = float(wave["remaining"]) - delta
+		if float(wave["remaining"]) <= 0.0:
+			_pending_copy_waves.remove_at(index)
+			if is_instance_valid(wave["world"]) and is_instance_valid(wave["shooter"]):
+				for config in wave["configs"]:
+					var projectile := _acquire_projectile(wave["world"], config, wave["position"])
+					projectile_spawned.emit(projectile)
+	_cooldown = maxf(0.0, _cooldown - delta)
+	if _reload_remaining > 0.0:
+		_reload_remaining = maxf(0.0, _reload_remaining - delta)
+		if _reload_remaining <= 0.0:
+			_finish_reload()
+		else:
+			reload_progress_changed.emit(get_reload_progress(), _reload_remaining)
+	if _charge_active:
+		_charge_elapsed = minf(charge_time, _charge_elapsed + delta)
+	_recoil = lerpf(_recoil, 0.0, minf(1.0, delta * 15.0))
+	if _visual_root != null:
+		var reload_progress := get_reload_progress()
+		var reload_arch := sin(reload_progress * PI) if is_reloading() and not character_authored_reload else 0.0
+		var service_tick := sin(reload_progress * TAU * 2.0) * reload_arch
+		_visual_root.position = Vector3(0.0, -0.025 * reload_arch, _recoil + 0.04 * reload_arch)
+		_visual_root.rotation = Vector3(
+			reload_arch * 0.24,
+			0.0,
+			-reload_arch * 0.16 + service_tick * 0.035
+		)
+	if _mounted_melee_time > 0.0 and _visual_root != null:
+		_visual_root.rotation.y = sin((1.0 - _mounted_melee_time / 0.45) * PI) * 1.8 - 0.9
+	# 没有冷却/换弹/蓄力/明显后坐力时，整把枪没在动，关闭 process 节省 CPU。
+	if (
+		_cooldown <= 0.0
+		and _fate_mounts.is_empty()
+		and _mounted_melee_time <= 0.0
+		and _reload_remaining <= 0.0
+		and not _charge_active
+		and absf(_recoil) < 0.001
+		and _pending_copy_waves.is_empty()
+		and _pending_secondary_shots.is_empty()
+	):
+		set_process(false)
+
+
+func configure(p_gun_id: String, p_bullet_id: String) -> bool:
+	_pending_copy_waves.clear()
+	_pending_secondary_shots.clear()
+	_fire_sequence = 0
+	_reload_first_shot = false
+	cancel_reload()
+	cancel_charge()
+	_cooldown = 0.0
+	_recoil = 0.0
+	var gun_node := BlueprintRegistry.create_assembly_node(p_gun_id)
+	if gun_node == null:
+		return false
+	var is_melee := "melee" in gun_node.tags
+	var bullet_node: AssemblyNode = null
+	if not is_melee:
+		bullet_node = BlueprintRegistry.create_assembly_node(p_bullet_id)
+		if bullet_node == null:
+			gun_node.free()
+			return false
+	gun_id = p_gun_id
+	bullet_id = "" if is_melee else p_bullet_id
+	var gun_stats := gun_node.get_base_stats()
+	var bullet_stats := bullet_node.get_base_stats() if bullet_node != null else {}
+	_configure_common_stats(gun_stats.merged(bullet_stats, true), is_melee)
+	bullet_tags.clear()
+	if bullet_node != null:
+		bullet_tags.assign(bullet_node.tags)
+	_copy_chance = 0.0
+	_critical_chance = 0.12 if is_melee else (0.28 if gun_id == "bp_sniper" else 0.10)
+	_critical_damage_multiplier = 1.5
+	_projectile_behavior = _extract_projectile_behavior(gun_stats.merged(bullet_stats, true))
+	_secondary_guns.clear()
+	_source_tree = null
+	_apply_gun_behavior_tags()
+	bullet_geometry = _resolve_bullet_geometry(gun_node.tags)
+	bullet_color = BULLET_COLORS.get(bullet_id, Color(0.20, 0.84, 0.92) if is_melee else Color(0.76, 0.86, 0.92))
+	gun_node.free()
+	if bullet_node != null:
+		bullet_node.free()
+	_rebuild_visual()
+	_rebuild_fate_mounts()
+	loadout_changed.emit(gun_id, bullet_id)
+	ammo_changed.emit(current_ammo, magazine_size)
+	return true
+
+
+func configure_from_tree(tree: WeaponAssemblyTree) -> bool:
+	cancel_reload()
+	cancel_charge()
+	_cooldown = 0.0
+	_recoil = 0.0
+	if tree == null or tree.get_root() == null:
+		clear_weapon()
+		return false
+	var root := tree.get_root()
+	if _source_tree != tree:
+		_pending_copy_waves.clear()
+		_pending_secondary_shots.clear()
+		_fire_sequence = 0
+		_reload_first_shot = false
+		_secondary_rate_remainder = 0.0
+	_source_tree = tree
+	var bullet := root.slots.get(AssemblyNode.SlotType.BULLET) as AssemblyNode
+	gun_id = str(GUN_NAME_TO_ID.get(root.node_name, "bp_pistol"))
+	var root_is_melee := "melee" in root.tags
+	bullet_id = "" if root_is_melee else str(BULLET_NAME_TO_ID.get(bullet.node_name if bullet != null else "", "mod_bullet_standard"))
+	var stats := tree.get_computed_stats()
+	_configure_common_stats(stats, root_is_melee)
+	current_ammo = clampi(tree.current_ammo, 0, magazine_size)
+	_copy_chance = clampf(float(stats.get("copy_chance", 0.0)), 0.0, 1.0)
+	_critical_chance = 0.12 if root_is_melee else (0.28 if gun_id == "bp_sniper" else 0.10)
+	_critical_damage_multiplier = maxf(1.0, float(stats.get("crit_damage_multiplier", 1.5)))
+	_projectile_behavior = _extract_projectile_behavior(stats)
+	_secondary_guns.clear()
+	bullet_tags.clear()
+	if bullet != null:
+		bullet_tags.assign(bullet.tags)
+	var behavior_nodes := root.get_all_descendants()
+	behavior_nodes.append(root)
+	for node in behavior_nodes:
+		var owner_gun := node.parent_node
+		while owner_gun != null and owner_gun.node_type != AssemblyNode.NodeType.GUN_BODY:
+			owner_gun = owner_gun.parent_node
+		if node != root and node.node_type == AssemblyNode.NodeType.GUN_BODY and owner_gun == root:
+			var child_stats := node.get_computed_stats().duplicate(true)
+			# 旁挂枪（命运卡「枪上枪」）不走 `tree.get_computed_stats()`，所以品质倍率
+			# 在这里补一次，否则同一把金枪的主枪身吃加成、挂上去的副枪身不吃。
+			# `Projectile3D._fire_attached_gun` 直接读这两个键算伤害。
+			var grade_multiplier := (
+				WeaponDropGrade.damage_multiplier(_source_tree.drop_grade) if _source_tree != null else 1.0
+			)
+			if not is_equal_approx(grade_multiplier, 1.0):
+				child_stats["damage"] = float(child_stats.get("damage", 0.0)) * grade_multiplier
+				child_stats["bullet_damage"] = float(child_stats.get("bullet_damage", 0.0)) * grade_multiplier
+			child_stats["drop_grade"] = _source_tree.drop_grade if _source_tree != null else WeaponDropGrade.GRADE_BLUE
+			child_stats["tags"] = node.tags.duplicate()
+			child_stats["assembly_snapshot"] = WeaponInstance._serialize_node(node)
+			child_stats["mount_id"] = node.node_id
+			if node.parent_node != null and node.parent_node.node_type == AssemblyNode.NodeType.BULLET:
+				_projectile_behavior["attached_gun"] = child_stats
+			elif "Fate.SecondaryGun" in node.tags:
+				_secondary_guns.append(child_stats)
+		elif (node == root or owner_gun == root) and not bool(node.base_stats.get("fate_trigger_attachment", false)):
+			for tag in node.tags:
+				if tag not in bullet_tags:
+					bullet_tags.append(tag)
+	_apply_gun_behavior_tags()
+	bullet_geometry = _resolve_bullet_geometry(root.tags)
+	bullet_color = BULLET_COLORS.get(bullet_id, Color(0.20, 0.84, 0.92) if root_is_melee else Color(0.76, 0.86, 0.92))
+	_rebuild_visual()
+	_rebuild_fate_mounts()
+	loadout_changed.emit(gun_id, bullet_id)
+	ammo_changed.emit(current_ammo, magazine_size)
+	return true
+
+
+func _configure_common_stats(stats: Dictionary, melee: bool) -> void:
+	weapon_kind = "melee" if melee else "ranged"
+	if melee:
+		_base_damage = maxi(1, int(float(stats.get("damage", 1)) * float(stats.get("fate_damage_multiplier", 1.0))))
+		damage = maxi(1, int(_base_damage * damage_multiplier))
+		fire_rate = 0.0
+		projectile_count = 0
+		spread = 0.0
+		reload_time = 0.0
+		magazine_size = 0
+		current_ammo = 0
+		bullet_speed = 0.0
+		range_m = 0.0
+		charge_time = 0.0
+		_melee_profile = _build_melee_profile(stats)
+		return
+	_melee_profile.clear()
+	_base_damage = maxi(1, int((float(stats.get("damage", 0)) + float(stats.get("bullet_damage", 5))) * float(stats.get("fate_damage_multiplier", 1.0))))
+	damage = maxi(1, int(_base_damage * damage_multiplier))
+	fire_rate = maxf(0.2, float(stats.get("fire_rate", 3.0)))
+	projectile_count = maxi(1, int(stats.get("bullet_count", 1)))
+	spread = maxf(0.0, float(stats.get("spread", 0.0)))
+	reload_time = maxf(0.25, float(stats.get("reload_time", 1.5)) + float(stats.get("reload_penalty", 0.0)))
+	magazine_size = maxi(1, int(float(stats.get("magazine_size", 12)) * float(stats.get("fate_magazine_multiplier", 1.0))))
+	current_ammo = magazine_size
+	bullet_speed = 23.0 * float(stats.get("bullet_speed", 1.0)) * float(stats.get("fate_speed_multiplier", 1.0))
+	# 射程与弹速解耦：这里只读枪身声明的 `range`，不再由弹种速度倍率推导。
+	range_m = maxf(0.0, float(stats.get("range", 0.0)))
+	charge_time = maxf(0.0, float(stats.get("charge_time", 0.0)))
+
+
+func _build_melee_profile(stats: Dictionary) -> Dictionary:
+	var steps: Array[Dictionary] = []
+	var combo_count := clampi(int(stats.get("melee_combo_count", 3)), 1, 3)
+	for index in range(1, combo_count + 1):
+		steps.append({
+			"damage_scale": float(stats.get("melee_%d_damage_scale" % index, 1.0)),
+			"windup_s": float(stats.get("melee_%d_windup_s" % index, 0.2)),
+			"active_s": float(stats.get("melee_%d_active_s" % index, 0.1)),
+			"recovery_s": float(stats.get("melee_%d_recovery_s" % index, 0.25)),
+			"knockback_scale": float(stats.get("melee_%d_knockback_scale" % index, 1.0)),
+			"pose_id": ["sweep_left", "sweep_right", "overhead_finisher"][index - 1],
+		})
+	return {
+		"content_id": gun_id.replace("bp_", "weapon_"),
+		"assembly_id": gun_id,
+		"reach": float(stats.get("melee_reach", 2.5)),
+		"arc_degrees": float(stats.get("melee_arc_degrees", 100.0)),
+		"knockback": float(stats.get("melee_knockback", 4.0)),
+		"combo_count": combo_count,
+		"combo_steps": steps,
+	}
+
+
+func clear_weapon() -> void:
+	cancel_reload()
+	cancel_charge()
+	gun_id = ""
+	bullet_id = ""
+	bullet_geometry = BULLET_GEOMETRY_NEUTRAL.duplicate()
+	current_ammo = 0
+	magazine_size = 0
+	weapon_kind = "ranged"
+	_melee_profile.clear()
+	if _visual_root != null:
+		_visual_root.visible = false
+		_visual_root.process_mode = Node.PROCESS_MODE_DISABLED
+		_visual_root.queue_free()
+		_visual_root = null
+	_muzzle = null
+	_ejection = null
+	_source_tree = null
+	_projectile_behavior.clear()
+	_secondary_guns.clear()
+	loadout_changed.emit("", "")
+	ammo_changed.emit(0, 0)
+
+
+func try_fire(aim_direction: Vector3, shooter: Node3D) -> bool:
+	if is_melee_weapon() or display_only or gun_id.is_empty() or _cooldown > 0.0 or _reload_remaining > 0.0:
+		return false
+	if current_ammo <= 0:
+		request_reload()
+		return false
+	if gun_id == "bp_charge":
+		_charge_aim = aim_direction.normalized()
+		_charge_shooter = shooter
+		if not _charge_active:
+			_charge_active = true
+			_charge_elapsed = 0.0
+			# 蓄力期间需要每帧更新，唤醒 process。
+			set_process(true)
+		return false
+	return _fire_now(aim_direction, shooter, 1.0)
+
+
+func release_charge() -> bool:
+	if not _charge_active:
+		return false
+	var ratio := clampf(_charge_elapsed / maxf(0.01, charge_time), 0.0, 1.0)
+	_charge_active = false
+	_charge_elapsed = 0.0
+	var active_shooter := _charge_shooter
+	_charge_shooter = null
+	if ratio < 0.12 or active_shooter == null or not is_instance_valid(active_shooter):
+		return false
+	return _fire_now(_charge_aim, active_shooter, lerpf(0.72, 2.35, ratio))
+
+
+func cancel_charge() -> void:
+	_charge_active = false
+	_charge_elapsed = 0.0
+	_charge_shooter = null
+
+
+func _fire_now(aim_direction: Vector3, shooter: Node3D, shot_damage_multiplier: float) -> bool:
+	if display_only or gun_id.is_empty() or _cooldown > 0.0 or _reload_remaining > 0.0 or current_ammo <= 0:
+		return false
+	var world := get_tree().current_scene
+	if world == null:
+		return false
+	_cooldown = 1.0 / fire_rate
+	current_ammo -= 1
+	_fire_sequence += 1
+	_mount_pulse = 0.14
+	_update_fate_mounts()
+	_recoil = 0.16 if gun_id == "bp_shotgun" or gun_id == "bp_launcher" else 0.09
+	# 开火触发后坐力衰减，重新打开 process。
+	set_process(true)
+	var behavior := _projectile_behavior.duplicate(true)
+	var base_direction := aim_direction.normalized()
+	behavior["source_weapon_tree"] = _source_tree
+	behavior["source_weapon"] = self
+	behavior["owner_damage_multiplier"] = damage_multiplier
+	behavior["owner_critical_chance"] = _critical_chance + _character_critical_bonus(shooter)
+	behavior["owner_critical_multiplier"] = _critical_damage_multiplier
+	if is_instance_valid(_source_tree):
+		shot_damage_multiplier *= _source_tree.consume_shot_damage_bonus()
+	var nth := int(behavior.get("every_nth_fire", 0))
+	var after_reload := bool(behavior.get("nth_after_reload", false))
+	if nth > 0 and ((_reload_first_shot if after_reload else _fire_sequence % nth == 0)):
+		shot_damage_multiplier *= float(behavior.get("nth_damage_multiplier", 2.0))
+		behavior["nth_explosion"] = bool(behavior.get("nth_explosion_enabled", false))
+	_reload_first_shot = false
+	var alternate_secondary := bool(behavior.get("alternate_fire", false)) and _fire_sequence % 2 == 0 and not _secondary_guns.is_empty()
+	var emitted_count := 0
+	var forced_critical := _consume_forced_critical()
+	for index in range(0 if alternate_secondary else projectile_count):
+		var angle := 0.0
+		if projectile_count > 1:
+			angle = lerpf(-spread * 0.5, spread * 0.5, float(index) / float(projectile_count - 1))
+		elif spread > 0.0:
+			angle = randf_range(-spread * 0.5, spread * 0.5)
+		var shot_direction := base_direction.rotated(Vector3.UP, angle).normalized()
+		var is_critical := forced_critical or randf() < _critical_chance + _character_critical_bonus(shooter)
+		var projectile_damage := maxi(1, int(damage * shot_damage_multiplier))
+		if is_critical:
+			# Enemy3D 的通用暴击入口会乘 1.5；在这里补齐命运卡的实际倍率差额。
+			projectile_damage = maxi(1, int(projectile_damage * _critical_damage_multiplier / 1.5))
+		var projectile_config := {
+			"direction": shot_direction,
+			"speed": bullet_speed,
+			"damage": projectile_damage,
+			"critical": is_critical,
+			"hostile": false,
+			"tags": bullet_tags,
+			"color": bullet_color,
+			# 弹种专属弹体视觉路由（04 §6.2 visual_id）：Projectile3D 按此查表选 Prefab。
+			"visual_id": bullet_id,
+			# 枪身弹体几何档位：同弹种在不同枪上有不同尺寸/拉伸/生长过程。
+			"gun_bullet_geometry": bullet_geometry,
+			"shooter": shooter,
+			"behavior": behavior,
+			# 枪身声明的射程上限（米）；0 = 不启用，退回旧的按存活时间口径。
+			"range": range_m,
+			# 默认子弹不位移；霰弹枪给轻微击退（0.8 m/s × 0.16s ≈ 0.064m）。
+			# 后续若扩展其他武器的差异化击退，按 gun_id 在这里加分即可。
+			"hit_knockback": 0.8 if gun_id == "bp_shotgun" else 0.0,
+		}
+		var projectile := _acquire_projectile(
+			world, projectile_config, _muzzle.global_position if _muzzle != null else global_position
+		)
+		projectile_spawned.emit(projectile)
+		emitted_count += 1
+		if _copy_chance > 0.0 and randf() < _copy_chance:
+			var copied_config := projectile_config.duplicate(true)
+			copied_config["direction"] = shot_direction.rotated(
+				Vector3.UP, 0.045 if index % 2 == 0 else -0.045
+			)
+			var copied := _acquire_projectile(
+				world,
+				copied_config,
+				_muzzle.global_position if _muzzle != null else global_position,
+			)
+			projectile_spawned.emit(copied)
+			emitted_count += 1
+	if not bool(behavior.get("alternate_fire", false)) or alternate_secondary:
+		for secondary in _secondary_guns:
+			emitted_count += _fire_secondary_gun(world, shooter, base_direction, secondary, forced_critical)
+			var rate_scale := float(behavior.get("uncontrolled_fire_rate_scale", 1.0))
+			_secondary_rate_remainder += maxf(0.0, rate_scale - 1.0)
+			var extras := int(_secondary_rate_remainder)
+			_secondary_rate_remainder -= extras
+			for extra in range(extras):
+				_pending_secondary_shots.append({"remaining": float(extra + 1) / (fire_rate * rate_scale), "world": world, "shooter": shooter, "direction": base_direction, "secondary": secondary.duplicate(true), "source": _source_tree})
+	if bool(behavior.get("copy_fire", false)) and not alternate_secondary:
+		emitted_count += _fire_copy_wave(
+			world,
+			shooter,
+			base_direction,
+			float(behavior.get("second_wave_damage_scale", 0.6)),
+			behavior,
+		)
+	_spawn_muzzle_effect(world)
+	_spawn_shell_casing(shooter)
+	if AudioManager != null and not alternate_secondary:
+		AudioManager.play_fire_sfx(gun_id)
+	if MonsterAIManager != null:
+		MonsterAIManager.broadcast_sound_stimulus(
+			shooter.global_position if shooter != null else global_position,
+			20.0 if gun_id == "bp_launcher" else 14.0,
+			"weapon_fire",
+			shooter
+		)
+	shot_fired.emit(emitted_count)
+	if is_instance_valid(_source_tree):
+		_source_tree.current_ammo = current_ammo
+	ammo_changed.emit(current_ammo, magazine_size)
+	if current_ammo <= 0:
+		request_reload()
+	return true
+
+
+## 按枪身 tags 解析弹体几何档位：先命中的族胜出；无命中回落中性档（不改观感）。
+func _resolve_bullet_geometry(gun_tags: Array) -> Dictionary:
+	for tag in gun_tags:
+		var key := String(tag)
+		if BULLET_GEOMETRY_BY_GUN_TAG.has(key):
+			return (BULLET_GEOMETRY_BY_GUN_TAG[key] as Dictionary).duplicate(true)
+	return BULLET_GEOMETRY_NEUTRAL.duplicate(true)
+
+
+func _apply_gun_behavior_tags() -> void:
+	if gun_id == "bp_launcher" and "explosive" not in bullet_tags:
+		bullet_tags.append("explosive")
+	# 蓄力萝卜炮同样打出范围爆炸：命中即爆，中心范围伤害由枪身 explosion_damage_scale 决定。
+	if gun_id == "bp_charge":
+		if "charged" not in bullet_tags:
+			bullet_tags.append("charged")
+		if "explosive" not in bullet_tags:
+			bullet_tags.append("explosive")
+	if bool(_projectile_behavior.get("homing", false)) and "homing" not in bullet_tags:
+		bullet_tags.append("homing")
+	if bool(_projectile_behavior.get("bounce", false)) and "bounce" not in bullet_tags:
+		bullet_tags.append("bounce")
+	if int(_projectile_behavior.get("pierce_level", 0)) > 0 and "piercing" not in bullet_tags:
+		bullet_tags.append("piercing")
+
+
+func _extract_projectile_behavior(stats: Dictionary) -> Dictionary:
+	var behavior := {}
+	for key in [
+		"homing", "homing_strength", "bounce", "bounce_count", "bounce_walls",
+		"bounce_damage_scale", "pierce_level", "chain_lightning", "chain_count",
+		"chain_range", "chain_damage_scale", "fuse_damage", "fuse_damage_type",
+		"dot_damage_per_sec", "dot_damage_per_stack", "dot_duration", "max_stacks",
+		"freeze_duration", "freeze_duration_elite", "fate_scale", "size_growth",
+		"growth_per_hit", "max_fate_scale", "return_to_player", "home_on_land",
+		"home_lifetime", "return_damage_multiplier", "spawn_turret_on_land",
+		"turret_duration", "turret_fire_rate", "uncontrolled_gun", "aim_randomness",
+		"uncontrolled_damage_scale", "copy_fire", "copy_fire_delay",
+		"second_wave_damage_scale", "explode_on_reload", "explosion_radius",
+		"explosion_damage_scale", "every_nth_fire", "every_nth_attach_gun",
+		"visual_has_eyes", "visual_has_legs", "rock_projectile", "rock_shatter",
+		"fate_attachment_hit_trigger",
+		"crit_on_kill", "crit_damage_multiplier", "pierce_shield", "shield_damage_scale",
+		"target_mode", "return_on_hit", "refund_ammo", "outbound_damage_multiplier",
+		"mobile_turret", "backward_wave", "nth_damage_multiplier", "nth_after_reload", "nth_explosion_enabled",
+		"fate_elements", "growth_max_stacks", "growth_scale_per_hit", "grow_on_miss", "consume_growth_on_hit",
+		"uncontrolled_fire_rate_scale", "uncontrolled_recoil_scale", "alternate_fire",
+		"attract_enemies", "fate_attachment", "fate_attachment_reload_trigger", "attachment_cooldown",
+	]:
+		if stats.has(key):
+			behavior[key] = stats[key]
+	if not behavior.has("pierce_shield") and int(stats.get("pierce_level", 0)) > 0:
+		behavior["pierce_shield"] = true
+	return behavior
+
+
+func _consume_forced_critical() -> bool:
+	return is_instance_valid(_source_tree) and _source_tree.consume_crit_on_kill_stack()
+
+
+func _character_critical_bonus(shooter: Node3D) -> float:
+	return float(shooter.call("get_fate_critical_chance_bonus")) if is_instance_valid(shooter) and shooter.has_method("get_fate_critical_chance_bonus") else 0.0
+
+
+func refund_projectile_ammo(count: int, source: WeaponAssemblyTree) -> void:
+	if not is_instance_valid(source) or source != _source_tree:
+		return
+	current_ammo = mini(magazine_size, current_ammo + maxi(0, count))
+	source.current_ammo = current_ammo
+	ammo_changed.emit(current_ammo, magazine_size)
+
+
+func _fire_secondary_gun(
+	world: Node,
+	shooter: Node3D,
+	aim_direction: Vector3,
+	secondary: Dictionary,
+	forced_critical := false
+) -> int:
+	if randf() > float(secondary.get("follow_probability", 1.0)):
+		return 0
+	for entry in _fate_mounts:
+		if entry["stats"].get("mount_id") == secondary.get("mount_id"):
+			# 与 _update_fate_mounts 同一条纪律：先判有效性再做 as。副枪模型随挂点
+			# 一起被释放时，这里若直接 `as WeaponModel3D` 会抛 freed object。
+			if not is_instance_valid(entry.get("weapon")):
+				continue
+			var mounted := entry["weapon"] as WeaponModel3D
+			if is_instance_valid(mounted):
+				var direction := -mounted._muzzle.global_basis.z.normalized() if is_instance_valid(mounted._muzzle) else aim_direction
+				var child_multiplier := damage_multiplier
+				if bool(_projectile_behavior.get("uncontrolled_gun", false)):
+					direction = direction.rotated(Vector3.UP, randf_range(-PI, PI) * float(_projectile_behavior.get("aim_randomness", 1.0)))
+					child_multiplier *= float(_projectile_behavior.get("uncontrolled_damage_scale", 1.0))
+					_recoil *= float(_projectile_behavior.get("uncontrolled_recoil_scale", 1.0))
+				mounted.set_damage_multiplier(child_multiplier)
+				mounted._critical_chance = 1.0 if forced_critical else _critical_chance
+				return mounted.fire_mounted(shooter, direction, forced_critical)
+	return 0
+
+
+func _fire_copy_wave(
+	world: Node,
+	shooter: Node3D,
+	aim_direction: Vector3,
+	damage_scale: float,
+	behavior: Dictionary
+) -> int:
+	var configs: Array[Dictionary] = []
+	var backward := bool(behavior.get("backward_wave", false))
+	for index in range(projectile_count):
+		var angle := 0.0 if projectile_count <= 1 else lerpf(-spread * 0.5, spread * 0.5, float(index) / float(projectile_count - 1))
+		var is_critical := randf() < _critical_chance + _character_critical_bonus(shooter)
+		configs.append({
+			"direction": (-aim_direction if backward else aim_direction).rotated(Vector3.UP, angle),
+			"speed": bullet_speed,
+			"damage": maxi(1, int(damage * damage_scale * (_critical_damage_multiplier / 1.5 if is_critical else 1.0))),
+			"critical": is_critical,
+			"hostile": false, "tags": bullet_tags.duplicate(),
+			"color": bullet_color, "visual_id": bullet_id,
+			"gun_bullet_geometry": bullet_geometry,
+			"shooter": shooter, "behavior": behavior.duplicate(true),
+			"range": range_m,
+		})
+	var origin := _muzzle.global_position if _muzzle != null else global_position
+	var delay := float(behavior.get("copy_fire_delay", 0.1))
+	if delay > 0.0:
+		_pending_copy_waves.append({"remaining": delay, "configs": configs, "world": world, "shooter": shooter, "position": origin})
+		return 0
+	for config in configs:
+		var projectile := _acquire_projectile(world, config, origin)
+		projectile_spawned.emit(projectile)
+	return configs.size()
+
+
+## 解析投射物池（带缓存）。返回 null 表示当前场景没有池，调用方走新建兜底。
+func _resolve_projectile_pool() -> ProjectilePool3D:
+	if is_instance_valid(_projectile_pool_cache):
+		return _projectile_pool_cache
+	var pools := get_tree().get_nodes_in_group("projectile_pool_3d")
+	_projectile_pool_cache = pools[0] as ProjectilePool3D if not pools.is_empty() and pools[0] is ProjectilePool3D else null
+	return _projectile_pool_cache
+
+
+## 解析全局 VFX 池（带缓存）。返回 null 表示当前场景没有池，调用方走旧链兜底。
+func _resolve_vfx_pool() -> VfxPool3D:
+	if is_instance_valid(_vfx_pool_cache):
+		return _vfx_pool_cache
+	var vfx_pools := get_tree().get_nodes_in_group("vfx_pool_3d")
+	_vfx_pool_cache = vfx_pools[0] as VfxPool3D if not vfx_pools.is_empty() and vfx_pools[0] is VfxPool3D else null
+	return _vfx_pool_cache
+
+
+func _acquire_projectile(world: Node, config: Dictionary, world_position: Vector3) -> Projectile3D:
+	var pool := _resolve_projectile_pool()
+	if pool != null:
+		return pool.acquire(config, world_position)
+	var projectile := PROJECTILE_SCRIPT.new() as Projectile3D
+	projectile.configure(config)
+	world.add_child(projectile)
+	projectile.global_position = world_position
+	return projectile
+
+
+func request_reload() -> bool:
+	if is_melee_weapon() or display_only or gun_id.is_empty() or _reload_remaining > 0.0 or current_ammo >= magazine_size:
+		return false
+	# 正式战局注入备弹提供者；无提供者的训练场/表现测试维持无限备弹。
+	if _reload_ammo_provider.is_valid() and int(_reload_ammo_provider.call(0)) <= 0:
+		return false
+	_active_reload_duration = maxf(0.01, reload_time)
+	_reload_remaining = _active_reload_duration
+	cancel_charge()
+	_perform_reload_explosion()
+	if AudioManager != null:
+		AudioManager.play_reload_sfx(gun_id)
+	reload_started.emit(_active_reload_duration)
+	reload_progress_changed.emit(0.0, _reload_remaining)
+	# 换弹动画每帧更新，唤醒 process。
+	set_process(true)
+	return true
+
+
+func refill_ammo() -> bool:
+	if is_melee_weapon() or display_only or gun_id.is_empty():
+		return false
+	cancel_reload()
+	current_ammo = magazine_size
+	ammo_changed.emit(current_ammo, magazine_size)
+	return true
+
+
+func set_reload_ammo_provider(provider: Callable) -> void:
+	_reload_ammo_provider = provider
+
+
+func cancel_reload() -> bool:
+	if not is_reloading():
+		return false
+	_reload_remaining = 0.0
+	_active_reload_duration = 0.0
+	reload_progress_changed.emit(0.0, 0.0)
+	reload_ended.emit(false)
+	return true
+
+
+func set_damage_multiplier(multiplier: float) -> void:
+	damage_multiplier = maxf(0.1, multiplier)
+	damage = maxi(1, int(_base_damage * damage_multiplier))
+
+
+func is_reloading() -> bool:
+	return _reload_remaining > 0.0
+
+
+func is_melee_weapon() -> bool:
+	return weapon_kind == "melee" and not _melee_profile.is_empty()
+
+
+## 蓄力枪当前是否正在蓄力。只读判定：`try_fire` 负责起蓄、`release_charge`
+## 负责击发，两者行为不变。自动射击（InputSettings.auto_fire）需要凭此
+## 决定"蓄满了该自动松手"，否则蓄力类武器会一直按着永不击发。
+func is_charge_active() -> bool:
+	return _charge_active
+
+
+func get_melee_profile() -> Dictionary:
+	return _melee_profile.duplicate(true)
+
+
+func roll_melee_critical() -> bool:
+	return is_melee_weapon() and randf() < _critical_chance
+
+
+func get_visual_bounds_hint() -> Vector3:
+	if gun_id == "bp_baseball_bat":
+		return Vector3(0.28, 0.28, 1.48)
+	if gun_id == "bp_greatblade":
+		return Vector3(0.82, 0.30, 2.42)
+	if gun_id == "bp_waraxe":
+		return Vector3(1.18, 0.34, 2.62)
+	var ranged := GUN_PROFILES.get(gun_id, GUN_PROFILES["bp_pistol"]) as Dictionary
+	return Vector3(float(ranged.get("width", 0.2)), float(ranged.get("height", 0.2)), float(ranged.get("length", 0.8)))
+
+
+func get_reload_progress() -> float:
+	if not is_reloading() or _active_reload_duration <= 0.0:
+		return 0.0
+	return clampf(1.0 - _reload_remaining / _active_reload_duration, 0.0, 1.0)
+
+
+func get_reload_snapshot() -> Dictionary:
+	return {
+		"active": is_reloading(),
+		"progress": get_reload_progress(),
+		"remaining": _reload_remaining,
+		"duration": _active_reload_duration if is_reloading() else reload_time,
+	}
+
+
+func get_snapshot() -> Dictionary:
+	return {
+		"gun_id": gun_id,
+		"bullet_id": bullet_id,
+		"weapon_kind": weapon_kind,
+		"uses_ammo": not is_melee_weapon(),
+		"melee": is_melee_weapon(),
+		"melee_profile": get_melee_profile(),
+		"visual_bounds_hint": get_visual_bounds_hint(),
+		"damage": damage,
+		"fire_rate": fire_rate,
+		"projectile_count": projectile_count,
+		"magazine_size": magazine_size,
+		"current_ammo": current_ammo,
+		"reloading": is_reloading(),
+		"reload_progress": get_reload_progress(),
+		"reload_remaining": _reload_remaining,
+		"reload_duration": _active_reload_duration if is_reloading() else reload_time,
+		"bullet_tags": bullet_tags.duplicate(),
+		"charge_time": charge_time,
+		"charge_active": _charge_active,
+		"charge_ratio": clampf(_charge_elapsed / maxf(0.01, charge_time), 0.0, 1.0) if charge_time > 0.0 else 0.0,
+		"copy_chance": _copy_chance,
+		"critical_chance": _critical_chance,
+		"fate_behavior": _projectile_behavior.duplicate(true),
+		"secondary_gun_count": _secondary_guns.size(),
+		"has_model": _visual_root != null,
+		"fate_visual_multiplier": _fate_visual_multiplier,
+		"visual_local_scale": _visual_root.scale if _visual_root != null else Vector3.ZERO,
+		"visual_global_scale": _visual_root.global_basis.get_scale() if _visual_root != null and _visual_root.is_inside_tree() else Vector3.ZERO,
+		"fate_scale_is_relative_to_mount": true,
+		"render_layers": render_layers,
+		"is_3d": true,
+	}
+
+
+func _finish_reload() -> void:
+	var missing := maxi(0, magazine_size - current_ammo)
+	var loaded := missing
+	if _reload_ammo_provider.is_valid():
+		loaded = clampi(int(_reload_ammo_provider.call(missing)), 0, missing)
+	current_ammo = mini(magazine_size, current_ammo + loaded)
+	_reload_remaining = 0.0
+	reload_progress_changed.emit(1.0, 0.0)
+	_active_reload_duration = 0.0
+	ammo_changed.emit(current_ammo, magazine_size)
+	if loaded > 0:
+		_reload_first_shot = true
+		if is_instance_valid(_source_tree):
+			_source_tree.current_ammo = current_ammo
+			var attachment := _source_tree.claim_attachment_trigger("reload")
+			if not attachment.is_empty():
+				_trigger_reload_attachment(attachment)
+	reload_ended.emit(loaded > 0)
+
+
+func _trigger_reload_attachment(attachment: Dictionary) -> void:
+	var player := _find_owner_player()
+	if player == null:
+		return
+	if attachment.has("pull_strength"):
+		for target in get_tree().get_nodes_in_group("enemy_3d"):
+			if target is Enemy3D and player.global_position.distance_to(target.global_position) <= 12.0:
+				target.apply_pull(player.global_position, float(attachment["pull_strength"]))
+	var count := int(attachment.get("bullet_count", 0))
+	if randf() < float(attachment.get("copy_chance", 0.0)):
+		count += 1
+	if count > 0:
+		var stats := {"damage": _base_damage, "bullet_damage": 0, "bullet_count": count, "spread": attachment.get("spread", spread)}
+		_fire_secondary_gun(get_tree().current_scene, player, -global_basis.z, stats)
+
+
+func _perform_reload_explosion() -> void:
+	if not bool(_projectile_behavior.get("explode_on_reload", false)):
+		return
+	var player := _find_owner_player()
+	if player == null:
+		return
+	var radius := maxf(1.0, float(_projectile_behavior.get("explosion_radius", 150.0)) / 30.0)
+	var damage_scale := float(_projectile_behavior.get("explosion_damage_scale", 0.8))
+	for value in get_tree().get_nodes_in_group("enemy_3d"):
+		var enemy := value as Enemy3D
+		if enemy == null or enemy.ai_state == "dead" or player.global_position.distance_to(enemy.global_position) > radius:
+			continue
+		enemy.notify_attacked_by(player)
+		enemy.take_projectile_damage(maxi(1, int(damage * damage_scale)), false, (enemy.global_position - player.global_position).normalized(), [], {"source_weapon_tree": _source_tree}, player)
+		if bool(_projectile_behavior.get("attract_enemies", false)):
+			enemy.apply_pull(player.global_position, radius)
+	var pools := get_tree().get_nodes_in_group("combat_effect_pool_3d")
+	if not pools.is_empty() and pools[0] is CombatEffectPool3D:
+		(pools[0] as CombatEffectPool3D).acquire("explosion", bullet_color, radius * 0.35, player.global_position)
+
+
+func _find_owner_player() -> Player3D:
+	var node := get_parent()
+	while node != null:
+		if node is Player3D:
+			return node as Player3D
+		node = node.get_parent()
+	return null
+
+
+func _rebuild_visual() -> void:
+	if not is_inside_tree():
+		return
+	if _visual_root != null:
+		_visual_root.visible = false
+		_visual_root.process_mode = Node.PROCESS_MODE_DISABLED
+		_visual_root.queue_free()
+	_visual_root = Node3D.new()
+	_visual_root.name = "MeleeVisual" if is_melee_weapon() else "GunVisual"
+	add_child(_visual_root)
+	_fate_visual_multiplier = clampf(
+		float(_projectile_behavior.get("fate_scale", DEFAULT_FATE_VISUAL_MULTIPLIER)),
+		0.45,
+		2.5
+	)
+	# 只乘不可变的当前挂点基础，绝不把命运倍率写成旧资产绝对尺寸。
+	_visual_root.scale = Vector3.ONE * _fate_visual_multiplier
+	_visual_root.set_meta("fate_scale_space", "current_mount_baseline")
+	if is_melee_weapon():
+		var melee_scene := MELEE_VISUAL_SCENES.get(gun_id) as PackedScene
+		if melee_scene != null:
+			var melee_visual := melee_scene.instantiate() as Node3D
+			_visual_root.add_child(melee_visual)
+			_apply_render_layers_recursive(melee_visual)
+			if melee_visual.has_method("configure"):
+				melee_visual.call("configure", render_layers)
+		_muzzle = null
+		_ejection = null
+		return
+	var profile: Dictionary = GUN_PROFILES.get(gun_id, GUN_PROFILES["bp_pistol"])
+	var length := float(profile["length"])
+	var barrel := float(profile["barrel"])
+	var width := float(profile["width"])
+	var height := float(profile["height"])
+	var body_color := profile["color"] as Color
+	var body_material := _material(body_color, 0.72, 0.34)
+	var dark_material := _material(Color(0.055, 0.07, 0.07), 0.84, 0.28)
+	var accent_material := _material(bullet_color.darkened(0.14), 0.32, 0.30, true)
+	var imported_scene := GUN_VISUAL_SCENES.get(gun_id) as PackedScene
+	if imported_scene != null:
+		var imported_asset := imported_scene.instantiate() as Node3D
+		_visual_root.add_child(imported_asset)
+		_apply_render_layers_recursive(imported_asset)
+		_muzzle = imported_asset.get_node_or_null("MuzzleSocket") as Marker3D
+		_ejection = imported_asset.get_node_or_null("EjectionSocket") as Marker3D
+		if _ejection == null:
+			_ejection = imported_asset.get_node_or_null("TacticalSocket") as Marker3D
+		_add_imported_attachment_visuals(imported_asset, accent_material)
+		return
+	_add_box("Receiver", Vector3(0, 0, -length * 0.42), Vector3(width, height, length), body_material)
+	_add_box("Stock", Vector3(0, -0.03, 0.14), Vector3(width * 0.82, height * 0.82, length * 0.34), dark_material)
+	_add_box("Grip", Vector3(0, -height * 0.55, -length * 0.30), Vector3(width * 0.48, height * 0.75, 0.18), dark_material)
+	_add_cylinder("Barrel", Vector3(0, 0.01, -length - barrel * 0.48), width * (0.26 if gun_id != "bp_launcher" else 0.52), barrel, dark_material)
+	if gun_id in ["bp_sniper", "bp_charge"]:
+		_add_cylinder("Optic", Vector3(0, height * 0.72, -length * 0.55), width * 0.22, length * 0.48, accent_material)
+	if gun_id == "bp_machinegun":
+		_add_box("AmmoBox", Vector3(width * 0.70, -height * 0.18, -length * 0.45), Vector3(width * 0.72, height * 1.05, length * 0.42), accent_material)
+	if gun_id == "bp_charge":
+		for side in [-1.0, 1.0]:
+			_add_cylinder("ChargeCoil", Vector3(width * side, 0, -length * 0.72), width * 0.18, length * 0.52, accent_material)
+	if _source_tree != null and _source_tree.get_root() != null:
+		var source_root := _source_tree.get_root()
+		if source_root.slots.get(AssemblyNode.SlotType.MUZZLE) != null:
+			_add_cylinder("InstalledMuzzle", Vector3(0, 0.01, -length - barrel * 0.96), width * 0.34, barrel * 0.44, accent_material)
+		if source_root.slots.get(AssemblyNode.SlotType.MAGAZINE) != null:
+			_add_box("InstalledMagazine", Vector3(0, -height * 0.80, -length * 0.48), Vector3(width * 0.82, height * 1.10, length * 0.26), accent_material)
+		if source_root.slots.get(AssemblyNode.SlotType.SCOPE) != null:
+			_add_cylinder("InstalledScope", Vector3(0, height * 0.82, -length * 0.58), width * 0.22, length * 0.40, accent_material)
+		if source_root.slots.get(AssemblyNode.SlotType.STOCK) != null:
+			_add_box("InstalledStock", Vector3(0, -0.03, length * 0.30), Vector3(width * 0.92, height * 0.92, length * 0.42), accent_material)
+		if source_root.slots.get(AssemblyNode.SlotType.TACTICAL) != null:
+			_add_box("InstalledTactical", Vector3(width * 0.70, -height * 0.06, -length * 0.62), Vector3(width * 0.32, height * 0.32, length * 0.28), accent_material)
+		if source_root.slots.get(AssemblyNode.SlotType.MUTATOR) != null:
+			_add_box("InstalledMutator", Vector3(-width * 0.56, height * 0.10, -length * 0.42), Vector3(width * 0.12, height * 0.54, length * 0.36), accent_material)
+	var fate_used := maxi(0, int(get_meta("fate_slot_used", 0)))
+	for fate_index in mini(fate_used, 8):
+		var row := fate_index / 4
+		var column := fate_index % 4
+		_add_box(
+			"FateRune%02d" % (fate_index + 1),
+			Vector3(width * (-0.66 + float(column) * 0.44), height * (0.52 - float(row) * 0.34), -length * 0.42),
+			Vector3(width * 0.12, height * 0.12, length * 0.08),
+			accent_material,
+		)
+	_muzzle = Marker3D.new()
+	_muzzle.name = "Muzzle"
+	_muzzle.position = Vector3(0, 0, -length - barrel)
+	_visual_root.add_child(_muzzle)
+	_ejection = Marker3D.new()
+	_ejection.name = "EjectionSocket"
+	_ejection.position = Vector3(width * 0.62, height * 0.20, -length * 0.42)
+	_visual_root.add_child(_ejection)
+
+
+func _apply_render_layers_recursive(root: Node) -> void:
+	if root is MeshInstance3D:
+		var mesh_instance := root as MeshInstance3D
+		mesh_instance.layers = render_layers
+		mesh_instance.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_ON
+		mesh_instance.gi_mode = GeometryInstance3D.GI_MODE_DISABLED
+	for child in root.get_children():
+		_apply_render_layers_recursive(child)
+
+
+func _socket_position(asset: Node3D, socket_name: String, fallback: Vector3) -> Vector3:
+	var socket := asset.get_node_or_null(socket_name) as Marker3D
+	return socket.position if socket != null else fallback
+
+
+func _add_authored_attachment(source: AssemblyNode, node_name: String, socket_position: Vector3, installed_extent: float) -> bool:
+	var scene := AUTHORED_ATTACHMENT_SCENES.get(source.node_name) as PackedScene
+	if scene == null:
+		return false
+	var wrapper := Node3D.new()
+	wrapper.name = node_name
+	wrapper.position = socket_position
+	var visual := scene.instantiate() as Node3D
+	var dimensions: Vector3 = visual.get_meta("dimensions_m", Vector3.ONE)
+	var factor := installed_extent / maxf(dimensions.x, maxf(dimensions.y, dimensions.z))
+	visual.scale = Vector3.ONE * factor
+	visual.position.y = -dimensions.y * factor * 0.5
+	wrapper.add_child(visual)
+	_visual_root.add_child(wrapper)
+	_apply_render_layers_recursive(wrapper)
+	return true
+
+
+func _add_imported_attachment_visuals(asset: Node3D, accent_material: StandardMaterial3D) -> void:
+	if _source_tree != null and _source_tree.get_root() != null:
+		var source_root := _source_tree.get_root()
+		if source_root.slots.get(AssemblyNode.SlotType.MUZZLE) != null:
+			_add_cylinder("InstalledMuzzle", _socket_position(asset, "MuzzleAttachmentSocket", Vector3(0, 0, -0.75)), 0.055, 0.16, accent_material)
+		if source_root.slots.get(AssemblyNode.SlotType.MAGAZINE) != null:
+			_add_box("InstalledMagazine", _socket_position(asset, "MagazineSocket", Vector3(0, -0.12, -0.20)), Vector3(0.14, 0.24, 0.18), accent_material)
+		if source_root.slots.get(AssemblyNode.SlotType.SCOPE) != null:
+			_add_cylinder("InstalledScope", _socket_position(asset, "ScopeSocket", Vector3(0, 0.24, -0.35)), 0.045, 0.28, accent_material)
+		if source_root.slots.get(AssemblyNode.SlotType.STOCK) != null:
+			_add_box("InstalledStock", _socket_position(asset, "StockSocket", Vector3(0, 0.05, 0.25)), Vector3(0.22, 0.22, 0.32), accent_material)
+		if source_root.slots.get(AssemblyNode.SlotType.TACTICAL) != null:
+			if not _add_authored_attachment(source_root.slots[AssemblyNode.SlotType.TACTICAL], "InstalledTactical", _socket_position(asset, "TacticalSocket", Vector3(0.14, 0.02, -0.35)), 0.20):
+				_add_box("InstalledTactical", _socket_position(asset, "TacticalSocket", Vector3(0.14, 0.02, -0.35)), Vector3(0.08, 0.08, 0.20), accent_material)
+		if source_root.slots.get(AssemblyNode.SlotType.MUTATOR) != null:
+			if not _add_authored_attachment(source_root.slots[AssemblyNode.SlotType.MUTATOR], "InstalledMutator", _socket_position(asset, "MutatorSocket", Vector3(-0.14, 0.02, -0.30)), 0.16):
+				_add_box("InstalledMutator", _socket_position(asset, "MutatorSocket", Vector3(-0.14, 0.02, -0.30)), Vector3(0.06, 0.16, 0.16), accent_material)
+	var fate_used := maxi(0, int(get_meta("fate_slot_used", 0)))
+	var rune_origin := _socket_position(asset, "MutatorSocket", Vector3(-0.14, 0.06, -0.28))
+	for fate_index in mini(fate_used, 8):
+		var row := fate_index / 4
+		var column := fate_index % 4
+		_add_box(
+			"FateRune%02d" % (fate_index + 1),
+			rune_origin + Vector3(float(column) * 0.035, float(row) * -0.035, 0.0),
+			Vector3(0.024, 0.024, 0.045),
+			accent_material,
+		)
+
+
+func _spawn_muzzle_effect(world: Node) -> void:
+	if _muzzle == null:
+		return
+	# 枪口闪光改走全局 VfxPool（AssetID 路由），传入真实射击方向（-global_basis.z）。
+	# 跟随目标是 muzzle 挂点本身：_visual_root 会被后坐力/换弹位移带动，跟武器根会差一截。
+	var muzzle_world := _muzzle.global_position
+	var vfx_pool := _resolve_vfx_pool()
+	if vfx_pool != null:
+		vfx_pool.acquire(
+			VfxPool3D.FX01_MUZZLE_FLASH, muzzle_world, bullet_color, MUZZLE_FLASH_EFFECT_SIZE,
+			{"forward": -global_basis.z, "follow": _muzzle}
+		)
+		return
+	# 旧链兜底：VfxPool 不可用时退回 CombatEffect3D（EFFECT_SCENE 仍保留作兜底用途）。
+	var effect := EFFECT_SCENE.instantiate() as CombatEffect3D
+	effect.configure("muzzle", bullet_color, MUZZLE_FLASH_EFFECT_SIZE)
+	world.add_child(effect)
+	effect.global_position = muzzle_world
+
+
+func _spawn_shell_casing(shooter: Node3D) -> void:
+	if _ejection == null or is_melee_weapon():
+		return
+	var vfx_pool := _resolve_vfx_pool()
+	if vfx_pool == null:
+		return
+	# 抛壳方向：枪械右侧 + 少量抬升 + 少量枪口前向；不绑定 follow，生成后进入世界空间。
+	# 落地由弹壳自己按 floor_y 程序化模拟（不接物理引擎），故不需传场景根节点。
+	#
+	# 每一发都带随机扰动（业主 2026-09-22：「不然太整齐了」）⇒ 连发弹壳不再排成一条整齐弧线。
+	# 幅度口径与推算散布见上方 SHELL_EJECT_* 常量块。
+	# ⛔ 出生点仍**精确**取抛壳挂点（业主口径：弹壳必须挂在枪上），扰动只作用于抛出去之后的运动量 ——
+	#    验收对出生点漂移的容差是 0.001 m，别往这里加位置抖动。
+	var right := global_basis.x.normalized()
+	var up := global_basis.y.normalized()
+	var forward := (-global_basis.z).normalized()
+	var ejection_velocity := (
+		right * SHELL_EJECT_RIGHT_SPEED
+			* randf_range(1.0 - SHELL_EJECT_RIGHT_SPREAD, 1.0 + SHELL_EJECT_RIGHT_SPREAD)
+		+ up * SHELL_EJECT_UP_SPEED
+			* randf_range(1.0 - SHELL_EJECT_UP_SPREAD, 1.0 + SHELL_EJECT_UP_SPREAD)
+		+ forward * SHELL_EJECT_FORWARD_JITTER * randf_range(-1.0, 1.0)
+	)
+	var ejection_spin_axis := (
+		right + up * randf_range(0.1, 0.9) + forward * randf_range(-0.4, 0.4)
+	).normalized()
+	(vfx_pool).acquire(
+		VfxPool3D.FX01_SHELL_CASING,
+		_ejection.global_position,
+		SHELL_CASING_COLOR,
+		SHELL_CASING_SIZE,
+		{
+			"velocity": ejection_velocity,
+			"spin_axis": ejection_spin_axis,
+			"spin_speed": SHELL_EJECT_SPIN_SPEED
+				* randf_range(1.0 - SHELL_EJECT_SPIN_SPREAD, 1.0 + SHELL_EJECT_SPIN_SPREAD),
+			"initial_basis": _random_shell_initial_basis(),
+			"floor_y": _resolve_shell_floor_y(shooter),
+		}
+	)
+
+
+## 弹壳出生姿态的随机倾斜：绕**随机单位轴**旋转 randf_range(-1, 1) × SHELL_INITIAL_TILT_DEG。
+##
+## 随机轴在单位立方体内取点后归一化（而不是用球坐标的方位角/仰角）：
+## 球坐标取轴会在两极堆积，看起来只多出两三种姿态，随机感反而更差。
+## 立方体内取点、长度过短（概率 ≈ 0）才退回 UP，纯防御。
+func _random_shell_initial_basis() -> Basis:
+	var axis := Vector3(randf_range(-1.0, 1.0), randf_range(-1.0, 1.0), randf_range(-1.0, 1.0))
+	if axis.length_squared() < 0.0001:
+		axis = Vector3.UP
+	var angle := deg_to_rad(randf_range(-1.0, 1.0) * SHELL_INITIAL_TILT_DEG)
+	return Basis(axis.normalized(), angle)
+
+
+## 弹壳落地的「地面高度」真源：射击者脚下的站立面世界 y。
+##
+## ⛔ 绝不能用 0 兜底。塔楼楼层是**向下**建造的（`TowerFloorStage3D` 挂在
+##    `stage.position.y = -FLOOR_HEIGHT_M(12.0) × floor_index` 之下），98F ≈ **-1176 m**。
+##    若 floor_y 取 0，弹壳出生点 y 就已经"低于地面"，弹壳第一帧即判定触地，
+##    被夹到 `floor_y + radius` ⇒ **瞬移到世界原点附近、掉出玩家视野**（2026-09-22 实机缺陷：
+##    「弹壳特效没了」）。这个坑只在**非零楼层**暴露，而验收场景恰好摆在 y≈0。
+##
+## 口径：射击者站在地板上 ⇒ 其 `global_position.y` 就是当前地面高度（玩家原点即脚底行走面，
+##    见 `TowerDescent3D` 把玩家摆在 `room.global_position + Vector3(0, 0.05, ...)`）。
+##    纯解析、不做任何物理查询 —— 与弹壳「不接物理引擎」的口径一致。
+func _resolve_shell_floor_y(shooter: Node3D) -> float:
+	if shooter != null and is_instance_valid(shooter):
+		return shooter.global_position.y
+	# 兜底用枪自身的 y（远优于 0：绝不会把弹壳瞬移到千里之外）。
+	return global_position.y
+
+
+func _add_box(node_name: String, position: Vector3, size: Vector3, material: StandardMaterial3D) -> void:
+	var mesh := BoxMesh.new()
+	mesh.size = size
+	mesh.material = material
+	var instance := MeshInstance3D.new()
+	instance.name = node_name
+	instance.position = position
+	instance.mesh = mesh
+	instance.layers = render_layers
+	# 手持武器与角色相同：允许太阳/房间灯投影；玩家灯通过层遮罩避开 layer 2。
+	instance.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_ON
+	instance.gi_mode = GeometryInstance3D.GI_MODE_DISABLED
+	_visual_root.add_child(instance)
+
+
+func _add_cylinder(node_name: String, position: Vector3, radius: float, length: float, material: StandardMaterial3D) -> void:
+	var mesh := CylinderMesh.new()
+	mesh.top_radius = radius
+	mesh.bottom_radius = radius
+	mesh.height = length
+	mesh.radial_segments = 14
+	mesh.material = material
+	var instance := MeshInstance3D.new()
+	instance.name = node_name
+	instance.position = position
+	instance.rotation_degrees.x = 90.0
+	instance.mesh = mesh
+	instance.layers = render_layers
+	instance.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_ON
+	instance.gi_mode = GeometryInstance3D.GI_MODE_DISABLED
+	_visual_root.add_child(instance)
+
+
+func _material(color: Color, metallic: float, roughness: float, emission := false) -> StandardMaterial3D:
+	var material := StandardMaterial3D.new()
+	material.albedo_color = color
+	material.metallic = metallic
+	material.roughness = roughness
+	if emission:
+		material.emission_enabled = true
+		material.emission = color
+		material.emission_energy_multiplier = 1.6
+	return material
+
+
+## Shared projection for carried and gun-mounted weapons: the actual source tree drives its own model and muzzle.
+static func create_mounted(snapshot: Dictionary, parent: Node3D) -> WeaponModel3D:
+	var tree := WeaponAssemblyTree.new()
+	var root := WeaponInstance._deserialize_node(snapshot)
+	if root == null:
+		tree.free()
+		return null
+	tree.set_root(root)
+	var mounted := WeaponModel3D.new()
+	mounted.gun_id = ""
+	mounted.name = "MountedWeapon"
+	parent.add_child(mounted)
+	mounted.add_child(tree)
+	mounted.configure_from_tree(tree)
+	return mounted
+
+
+func _rebuild_fate_mounts() -> void:
+	_fate_mounts.clear()
+	_mount_pulse = 0.0
+	if not is_instance_valid(_visual_root):
+		return
+	# 同一视觉根下只允许存在一个挂点锚。_rebuild_visual() 在模型未入树时会提前返回
+	# （不换 _visual_root），此时直接再建锚点会留下孤儿锚点与其副枪模型 —— 表现为
+	# 同一把副枪被渲染两遍。先摘掉旧的再建。
+	var previous_anchor := _visual_root.get_node_or_null("FateWeaponSocket")
+	if previous_anchor != null:
+		_visual_root.remove_child(previous_anchor)
+		previous_anchor.queue_free()
+	# Every gun has this structural socket, even with zero fate cards.
+	var anchor := Marker3D.new()
+	anchor.name = "FateWeaponSocket"
+	_visual_root.add_child(anchor)
+	if is_instance_valid(_muzzle):
+		anchor.position = _visual_root.to_local(_muzzle.global_position) + Vector3(0.20, 0.0, 0.0)
+	for stats in _secondary_guns:
+		var point := Marker3D.new()
+		point.name = "Mount%d" % (_fate_mounts.size() + 1)
+		anchor.add_child(point)
+		var mounted := create_mounted(stats.get("assembly_snapshot", {}), point)
+		if mounted == null:
+			continue
+		mounted.render_layers = render_layers
+		mounted._apply_render_layers_recursive(mounted)
+		mounted.projectile_spawned.connect(func(projectile: Projectile3D): projectile_spawned.emit(projectile))
+		_fate_mounts.append({"point": point, "weapon": mounted, "stats": stats, "reversed": bool(stats.get("mount_reversed", false))})
+	_update_fate_mounts()
+	if not _fate_mounts.is_empty():
+		set_process(true)
+
+
+func _update_fate_mounts() -> void:
+	# 先剔除已释放的挂点。武器视觉重建（_rebuild_visual）用 queue_free() 延迟释放旧
+	# _visual_root，其下的挂点会在帧末消失，而 _fate_mounts 可能仍持有引用。
+	# 必须**先判有效性、再做 as 转换**：`as` 作用在已释放对象上会抛
+	# "Trying to cast a freed object"，而本函数由 _process 每帧调用，会变成每帧刷屏。
+	var live_entries: Array[Dictionary] = []
+	for entry in _fate_mounts:
+		if is_instance_valid(entry.get("point")):
+			live_entries.append(entry)
+	if live_entries.size() != _fate_mounts.size():
+		_fate_mounts = live_entries
+	var counts := {false: 0, true: 0}
+	var indices := {false: 0, true: 0}
+	for entry in _fate_mounts:
+		counts[entry["reversed"]] += 1
+	for entry in _fate_mounts:
+		var point := entry["point"] as Marker3D
+		if not is_instance_valid(point):
+			continue
+		var rear := bool(entry["reversed"])
+		var horizontal := (float(indices[rear]) - float(counts[rear] - 1) * 0.5) * 0.48
+		indices[rear] += 1
+		point.position = Vector3(horizontal, 0.0, 0.0)
+		var player := _find_owner_player()
+		if rear and is_instance_valid(player):
+			point.global_transform = Transform3D(player.global_basis.orthonormalized(), player.to_global(Vector3(horizontal, 0.85, 0.65)))
+		elif rear:
+			point.position = Vector3(horizontal, 0.0, 0.85)
+		point.scale = Vector3.ONE * (0.65 if _mount_pulse > 0.0 and not display_only else 0.22)
+
+
+func fire_mounted(shooter: Node3D, forward: Vector3, forced_critical := false) -> int:
+	# A frozen source is an effect instance: never debit the player's source inventory ammunition.
+	if is_melee_weapon():
+		_mounted_melee_time = 0.45
+		set_process(true)
+		var reach := maxf(0.3, float(_melee_profile.get("reach", 1.6)) * global_basis.get_scale().length() / sqrt(3.0))
+		for target in get_tree().get_nodes_in_group("enemies"):
+			if not target is Node3D or target == shooter or not target.has_method("take_damage"):
+				continue
+			var offset: Vector3 = target.global_position - global_position
+			if offset.length() <= reach and offset.normalized().dot(forward) >= cos(deg_to_rad(float(_melee_profile.get("arc_degrees", 100.0)) * 0.5)):
+				var query := PhysicsRayQueryParameters3D.create(global_position, target.global_position + Vector3(0, 0.5, 0), 1)
+				if shooter is CollisionObject3D:
+					query.exclude = [shooter.get_rid()]
+				var obstruction := get_world_3d().direct_space_state.intersect_ray(query)
+				if obstruction.is_empty() or obstruction.get("collider") == target:
+					target.call("take_damage", damage, forced_critical, forward, float(_melee_profile.get("knockback", 4.0)))
+		return 1
+	_cooldown = 0.0
+	current_ammo = magazine_size
+	return projectile_count if _fire_now(forward, shooter, 1.0) else 0

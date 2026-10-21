@@ -1,0 +1,1662 @@
+{
+  "shared_scene_facility_palette": {
+    "resource": "assets/art/shared/palette/设施低亮多巴胺色盘_10x10_512.png",
+    "sha256": "a6b1838fb80ad3ce7764e998bb1dfb70edf2b9315a4282da0fb2ae35ed266ce3",
+    "scope": "all environment modules, base facilities and fixed decor props",
+    "blender_policy": "external link only; never pack or copy into a model source directory",
+    "glb_policy": "no embedded images/textures; export_image_format=NONE",
+    "godot_post_import": "tools/asset_pipeline/scene_facility_shared_palette_post_import.gd",
+    "managed_blend_sources": 31,
+    "managed_glbs": 147,
+    "source_controlled_glb_import_contracts": 147,
+    "source_controlled_palette_import_contracts": 1,
+    "deleted_duplicate_pngs": 51,
+    "palette_import_contract": {
+      "compress/mode": 0,
+      "mipmaps/generate": false
+    },
+    "material_roles": [
+      "01_精工金属_紫色骨架",
+      "02_细腻哑光_青绿大面",
+      "03_清漆反光_紫粉点缀",
+      "04_柔和自发光_UI灯光"
+    ],
+    "material_normalization": {
+      "blend": "tools/blender/normalize_current_base99_materials.py",
+      "glb": "tools/asset_pipeline/normalize_scene_facility_glb_materials.py",
+      "godot_post_import": [
+        "tools/asset_pipeline/scene_facility_shared_palette_post_import.gd",
+        "tools/asset_pipeline/scene_facility_door_visual_post_import.gd"
+      ]
+    }
+  },
+  "base99_corner_l_5m_height12": {
+    "asset_id": "ENV-TOWER-CORNER-L-5M",
+    "package": "117_基地5米L型转角墙_资产包",
+    "source": "art_source/environments/base_facility_3d/source/wall_height12/env_base99_corner_l_5m_source_v002.blend",
+    "derived_export": "art_source/environments/base_facility_3d/source/wall_height12/env_base99_corner_l_5m_source_v002.blend",
+    "glb": "assets/art/environments/base_facility_3d/components/env_base99_corner_l_5m/env_base99_corner_l_5m_visual_top3d_v002.glb",
+    "runtime_scene": "assets/art/environments/base_facility_3d/runtime/env_base99_corner_l_5m/env_base99_corner_l_5m_root_top3d_v005.tscn",
+    "scope": "TowerFloorStage3D facility 160m outer shell and active Base99 art layout; DungeonRoom3D keeps only the collision nodes",
+    "visual_policy": "Blender authored PaletteUV material; shared palette post-import",
+    "collision_policy": "two-arm 5m/12m BoxShape3D contract; native 11.9m visual"
+  },
+  "facilities": {
+    "locker_station": {
+      "name_cn": "赛博储物站",
+      "glb": "assets/art/props/base_world_3d/components/locker_station/prp_base_locker_station_visual_top3d_v004.glb",
+      "source": "art_source/props/base_world_3d/source/locker_station/prp_base_locker_station_source_v004.blend",
+      "bounds_min": [
+        -2.5,
+        0.0,
+        -0.8107070922851562
+      ],
+      "bounds_max": [
+        2.5,
+        3.900928497314453,
+        0.8132063746452332
+      ],
+      "presentation_scale_multiplier": 1.0,
+      "authoring_target_width_m": 5.0,
+      "runtime_facility_id": "vault",
+      "runtime_role": "保险柜正式交互模型",
+      "revision_note": "整体等比例5米宽模数；保持附件与主体原始比例"
+    },
+    "weapon_workshop": {
+      "name_cn": "赛博维修工作台",
+      "glb": "assets/art/props/base_world_3d/components/weapon_workshop/prp_base_weapon_workshop_visual_top3d_v005.glb",
+      "source": "art_source/props/base_world_3d/source/weapon_workshop/prp_base_weapon_workshop_source_v005.blend",
+      "bounds_min": [
+        -2.4825191497802734,
+        0.0,
+        -1.5004066228866577
+      ],
+      "bounds_max": [
+        2.499882459640503,
+        3.2799997329711914,
+        1.5004069805145264
+      ],
+      "presentation_scale_multiplier": 1.0,
+      "authoring_target_width_m": 5.0,
+      "chair_embedded": false,
+      "revision_note": "体量强化设施主体；座椅已拆为独立装饰资产"
+    },
+    "retro_tv_station": {
+      "name_cn": "复古游戏电视站",
+      "glb": "assets/art/props/base_world_3d/components/retro_tv_station/prp_base_retro_tv_station_visual_top3d_v004.glb",
+      "source": "art_source/props/base_world_3d/source/retro_tv_station/prp_base_retro_tv_station_source_v004.blend",
+      "bounds_min": [
+        -2.485461950302124,
+        0.0,
+        -1.6400688886642456
+      ],
+      "bounds_max": [
+        2.5,
+        4.820072174072266,
+        1.6610490083694458
+      ],
+      "presentation_scale_multiplier": 1.0,
+      "authoring_target_width_m": 5.0,
+      "runtime_facility_id": "fate_collection",
+      "runtime_role": "命运卡收藏室正式交互模型",
+      "revision_note": "整体等比例5米宽模数；保持附件与主体原始比例"
+    },
+    "mission_operations": {
+      "name_cn": "战术情报指挥桌",
+      "glb": "assets/art/props/base_world_3d/components/mission_operations/prp_base_mission_operations_visual_top3d_v005.glb",
+      "source": "art_source/props/base_world_3d/source/mission_operations/prp_base_mission_operations_source_v005.blend",
+      "bounds_min": [
+        -2.499999761581421,
+        0.0,
+        -1.339493989944458
+      ],
+      "bounds_max": [
+        2.499999761581421,
+        3.552326202392578,
+        1.339493989944458
+      ],
+      "presentation_scale_multiplier": 1.0,
+      "authoring_target_width_m": 5.0,
+      "chair_embedded": false,
+      "revision_note": "体量强化设施主体；座椅已拆为独立装饰资产"
+    },
+    "vending_machine": {
+      "name_cn": "科幻自动贩卖机",
+      "glb": "assets/art/props/base_world_3d/components/vending_machine/prp_base_vending_machine_visual_top3d_v003.glb",
+      "source": "art_source/props/base_world_3d/source/vending_machine/prp_base_vending_machine_source_v003.blend",
+      "bounds_min": [
+        -2.169503927230835,
+        0.0,
+        -0.7725990414619446
+      ],
+      "bounds_max": [
+        2.169503927230835,
+        3.5999999046325684,
+        0.7725991606712341
+      ],
+      "presentation_scale_multiplier": 1.6
+    }
+  },
+  "environment_modules": {
+    "tower_stairwell_generic_12m": {
+      "asset_id": "ENV-TOWER-STAIRWELL-GENERIC-12M",
+      "name_cn": "塔楼通用12米U形楼梯间",
+      "category": "environment_module",
+      "glb": "assets/art/environments/tower_descent_3d/components/env_tower_stairwell_generic_12m_top3d_v002.glb",
+      "source": "art_source/environments/tower_descent_3d/source/stairs_12m/stairwell_art_v021/env_tower_stairwell_dual_art_source_v021.blend",
+      "production_stage": "runtime_integrated",
+      "runtime": "assets/art/environments/tower_descent_3d/runtime/env_tower_stairwell_generic_12m/env_tower_stairwell_generic_12m_root_top3d_v002.tscn",
+      "footprint_size_m": [
+        15.0,
+        30.0
+      ],
+      "grid_unit_m": 5.0,
+      "upper_floor_m": 0.0,
+      "lower_floor_m": -12.0,
+      "lower_landing_top_m": -11.9,
+      "version": "v002",
+      "collision": "Godot runtime: one flush slope plane per flight in StairUnifiedSupport; lower-only camera slab; 4 flight guards aligned to v021 visible rails at +/-2.15m plus 2 landing edge guards with 0.15m closed corner joins",
+      "status": "runtime_integrated_verified"
+    },
+    "tower_stairwell_rooftop_12m": {
+      "asset_id": "ENV-TOWER-STAIRWELL-ROOFTOP-12M",
+      "name_cn": "塔楼楼顶专用12米U形楼梯间",
+      "category": "environment_module",
+      "glb": "assets/art/environments/tower_descent_3d/components/env_tower_stairwell_rooftop_12m_top3d_v002.glb",
+      "source": "art_source/environments/tower_descent_3d/source/stairs_12m/stairwell_art_v021/env_tower_stairwell_dual_art_source_v021.blend",
+      "production_stage": "runtime_integrated",
+      "runtime": "assets/art/environments/tower_descent_3d/runtime/env_tower_stairwell_rooftop_12m/env_tower_stairwell_rooftop_12m_root_top3d_v002.tscn",
+      "footprint_size_m": [
+        15.0,
+        30.0
+      ],
+      "grid_unit_m": 5.0,
+      "upper_floor_m": 0.0,
+      "lower_floor_m": -12.0,
+      "lower_landing_top_m": -11.9,
+      "version": "v002",
+      "collision": "Godot runtime: one flush slope plane per flight in StairUnifiedSupport; lower-only camera slab; 4 flight guards aligned to v021 visible rails at +/-2.15m plus 2 landing edge guards with 0.15m closed corner joins",
+      "status": "runtime_integrated_verified"
+    },
+    "base99_mezzanine_20x10_z5": {
+      "asset_id": "ENV-BASE99-MEZZANINE-20X10-Z5",
+      "name_cn": "基地99层二层楼中楼楼板20x10米Z5",
+      "category": "environment_module",
+      "glb": "assets/art/environments/base_facility_3d/components/env_base99_mezzanine_20x10_z5/env_base99_mezzanine_20x10_z5_visual_top3d_v004.glb",
+      "source": "art_source/environments/base_facility_3d/source/env_base99_modular_room/env_base99_modular_room_assets_clean_v006.blend",
+      "runtime": "assets/art/environments/base_facility_3d/runtime/env_base99_mezzanine_20x10_z5/env_base99_mezzanine_20x10_z5_root_top3d_v004.tscn",
+      "bounds_min": [
+        -10.12375,
+        0.0,
+        -5.12375
+      ],
+      "bounds_max": [
+        10.12375,
+        5.93,
+        5.12375
+      ],
+      "forward_axis": "-Z",
+      "version": "v004",
+      "materials": [
+        "01_精工金属_紫色骨架",
+        "02_细腻哑光_青绿大面",
+        "04_柔和自发光_UI灯光"
+      ],
+      "geometry": "structure and guardrails only; legacy inset deck skin and 8 tiles removed to reuse V020 floor finish",
+      "collision": "continuous deck plus independent guard blockers in PackedScene",
+      "interactive": false,
+      "standalone": true,
+      "status": "approved_runtime",
+      "usage": "TowerDescent99F five-meter mezzanine platform; V020 loft floor remains the only visible deck"
+    },
+    "base99_wall_contents_v021": {
+      "asset_id": "ENV-BASE99-WALL-CONTENTS-V021",
+      "name_cn": "基地99层非门墙面内容资产包",
+      "category": "environment_wall_content",
+      "glb_root": "assets/art/environments/base_facility_3d/components/env_base99_wall_contents_v021",
+      "source": "art_source/design/blender/base_facility_layout/source/base_facility_runtime_layout_hq_v021.blend",
+      "derived_from_blend": "art_source/design/blender/base_facility_layout/source/base_facility_runtime_layout_hq_v017.blend",
+      "derived_from_version": "v017",
+      "runtime": "assets/art/environments/base_facility_3d/runtime/env_base99_wall_contents_v021/env_base99_wall_contents_root_top3d_v003.tscn",
+      "version": "v021",
+      "package_count": 18,
+      "triangles_after_optimization": 86538,
+      "geometry": "downward faces removed for top-view use; each static package merged to one runtime mesh",
+      "collision": "visual_only_no_collision; retained structural wall collision is authoritative",
+      "excluded_scope": "doors, door frames, structural wall modules, wall panels, wall skins and wall blockers",
+      "status": "approved_runtime"
+    },
+    "base99_remaining_facilities_v021": {
+      "asset_id": "ENV-BASE99-REMAINING-FACILITIES-V021",
+      "name_cn": "基地99层剩余非门非墙独立设施资产包",
+      "category": "environment_facility_bundle",
+      "glb_root": "assets/art/environments/base_facility_3d/components/env_base99_remaining_facilities_v021",
+      "source": "art_source/design/blender/base_facility_layout/export/v021/base_facility_runtime_layout_hq-v021-remaining_facilities.blend",
+      "derived_from_blend": "art_source/design/blender/base_facility_layout/source/base_facility_runtime_layout_hq_v017.blend",
+      "derived_from_version": "v017",
+      "runtime": "assets/art/environments/base_facility_3d/runtime/env_base99_remaining_facilities_v021/env_base99_remaining_facilities_root_top3d_v004.tscn",
+      "version": "v021",
+      "package_count": 46,
+      "triangles_after_optimization": 84274,
+      "geometry": "each independent V017 facility package exports as one optimized runtime mesh; downward faces removed for top view; 42号大型卷帘主门已补入V021优化包",
+      "collision": "34 physical packages use per-source-object simplified BoxShape3D; 42号大型卷帘主门使用一体化BoxShape3D；其余11个地毯、灯光、帘布、植被和FX包保持仅视觉",
+      "excluded_scope": "floors, doors, door-attached controls, structural walls, wall content, mezzanine and stairs",
+      "status": "approved_runtime"
+    },
+    "base99_structural_v021": {
+      "asset_id": "ENV-BASE99-STRUCTURAL-V021",
+      "name_cn": "基地99层阁楼、楼梯与阁楼下铁皮结构资产包",
+      "glb_root": "assets/art/environments/base_facility_3d/components/env_base99_structural_v021",
+      "source": "art_source/design/blender/base_facility_layout/source/base_facility_runtime_layout_hq_v021.blend",
+      "derived_from_blend": "art_source/design/blender/base_facility_layout/source/base_facility_runtime_layout_hq_v017.blend",
+      "derived_from_version": "v017",
+      "version": "v021",
+      "package_count": 4,
+      "triangles_after_optimization": 31450,
+      "geometry": "Runtime GLBs use east stair v003 and northwest stair v006; northwest stair has 27.699 degrees and 16 treads per flight; downward-facing faces removed",
+      "collision": "Source convex stair ramps preserve slopes; the mezzanine has a walk deck plus 1.2m continuous south/west guardrail blockers, with the northwest stair entry kept open; underdeck retains component boxes",
+      "emission": "Shared palette post-import uses MULTIPLY to preserve emissive color without adding white",
+      "status": "approved_runtime"
+    },
+    "base99_mezzanine_underdeck_blocker": {
+      "asset_id": "ENV-BASE99-MEZZANINE-UNDERDECK-BLOCKER",
+      "name_cn": "基地99层楼中楼下方工业仓库挡板",
+      "category": "environment_module",
+      "glb": "assets/art/environments/base_facility_3d/components/env_base99_mezzanine_underdeck_blocker/env_base99_mezzanine_underdeck_blocker_visual_top3d_v003.glb",
+      "source": "art_source/environments/base_facility_3d/source/env_base99_mezzanine_underdeck_blocker/env_base99_mezzanine_underdeck_blocker_source_v003.blend",
+      "runtime": "assets/art/environments/base_facility_3d/runtime/env_base99_mezzanine_underdeck_blocker/env_base99_mezzanine_underdeck_blocker_root_top3d_v003.tscn",
+      "bounds_min": [
+        -9.66,
+        0.0,
+        -4.66
+      ],
+      "bounds_max": [
+        9.65,
+        4.65,
+        4.45
+      ],
+      "forward_axis": "-Z",
+      "version": "v003",
+      "materials": [
+        "01_精工金属_冷灰骨架",
+        "02_细腻哑光_中灰横向板",
+        "03_清漆反光_浅灰边条"
+      ],
+      "frame_inset_m": 0.55,
+      "collision": "three authored panel-aligned permanent PackedScene blockers; physical ray verified",
+      "interactive": false,
+      "standalone": true,
+      "status": "approved_runtime",
+      "usage": "TowerDescent99F mezzanine underside enclosure"
+    }
+  },
+  "weapons": {
+    "water_tank_blaster": {
+      "name_cn": "水箱爆能枪",
+      "glb": "assets/art/weapons/weapon_3d/components/water_tank_blaster/wpn_water_tank_blaster_visual_top3d_v003.glb",
+      "source": "art_source/weapons/weapon_3d/source/water_tank_blaster/wpn_water_tank_blaster_source_v003.blend",
+      "bounds_min": [
+        -0.3408644199371338,
+        -0.32526931166648865,
+        -1.1996233463287354
+      ],
+      "bounds_max": [
+        0.3408644199371338,
+        0.868689775466919,
+        0.6203765869140625
+      ],
+      "presentation_scale_multiplier": 1.3,
+      "sockets": {
+        "grip": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "support_hand": [
+          0.0,
+          0.1563641595840454,
+          -0.6238041400909424
+        ],
+        "muzzle": [
+          0.0,
+          0.3474759101867676,
+          -1.1996233463287354
+        ],
+        "muzzle_attachment": [
+          0.0,
+          0.3474759101867676,
+          -1.1996233463287354
+        ],
+        "scope": [
+          0.0,
+          0.868689775466919,
+          -0.45585687160491944
+        ],
+        "magazine": [
+          0.0,
+          -0.2341939043998718,
+          -0.3358945369720459
+        ],
+        "stock": [
+          0.0,
+          0.1737379550933838,
+          0.6203765869140625
+        ],
+        "tactical": [
+          0.3408644199371338,
+          0.21717244386672974,
+          -0.5758192062377929
+        ],
+        "mutator": [
+          -0.3408644199371338,
+          0.21717244386672974,
+          -0.40787193775177005
+        ]
+      }
+    },
+    "megaphone_cannon": {
+      "name_cn": "扩音器加农炮",
+      "glb": "assets/art/weapons/weapon_3d/components/megaphone_cannon/wpn_megaphone_cannon_visual_top3d_v003.glb",
+      "source": "art_source/weapons/weapon_3d/source/megaphone_cannon/wpn_megaphone_cannon_source_v003.blend",
+      "bounds_min": [
+        -0.409406453371048,
+        0.014394395984709263,
+        -0.7919365763664246
+      ],
+      "bounds_max": [
+        0.4094063937664032,
+        1.0381017923355103,
+        0.8330634236335754
+      ],
+      "presentation_scale_multiplier": 1.3,
+      "sockets": {
+        "grip": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "support_hand": [
+          0.0,
+          0.18685832262039184,
+          -0.4118070197105408
+        ],
+        "muzzle": [
+          0.0,
+          0.4152407169342041,
+          -0.7919365763664246
+        ],
+        "muzzle_attachment": [
+          0.0,
+          0.4152407169342041,
+          -0.7919365763664246
+        ],
+        "scope": [
+          0.0,
+          1.0381017923355103,
+          -0.30093589901924134
+        ],
+        "magazine": [
+          0.0,
+          0.010363965108990668,
+          -0.2217422413825989
+        ],
+        "stock": [
+          0.0,
+          0.20762035846710206,
+          0.8330634236335754
+        ],
+        "tactical": [
+          0.4094063937664032,
+          0.25952544808387756,
+          -0.38012955665588377
+        ],
+        "mutator": [
+          -0.409406453371048,
+          0.25952544808387756,
+          -0.2692584359645844
+        ]
+      }
+    },
+    "guitar_blaster": {
+      "name_cn": "吉他爆能枪",
+      "glb": "assets/art/weapons/weapon_3d/components/guitar_blaster/wpn_guitar_blaster_visual_top3d_v003.glb",
+      "source": "art_source/weapons/weapon_3d/source/guitar_blaster/wpn_guitar_blaster_source_v003.blend",
+      "bounds_min": [
+        -0.16078202426433563,
+        -0.034300170838832855,
+        -1.027563214302063
+      ],
+      "bounds_max": [
+        0.16078205406665802,
+        0.9749565720558167,
+        0.7274367809295654
+      ],
+      "presentation_scale_multiplier": 1.3,
+      "sockets": {
+        "grip": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "support_hand": [
+          0.0,
+          0.17549218297004698,
+          -0.5343328714370728
+        ],
+        "muzzle": [
+          0.0,
+          0.3899826288223267,
+          -1.027563214302063
+        ],
+        "muzzle_attachment": [
+          0.0,
+          0.3899826288223267,
+          -1.027563214302063
+        ],
+        "scope": [
+          0.0,
+          0.9749565720558167,
+          -0.39047402143478394
+        ],
+        "magazine": [
+          0.0,
+          -0.024696123003959656,
+          -0.28771770000457764
+        ],
+        "stock": [
+          0.0,
+          0.19499131441116335,
+          0.7274367809295654
+        ],
+        "tactical": [
+          0.16078205406665802,
+          0.24373914301395416,
+          -0.49323034286499023
+        ],
+        "mutator": [
+          -0.16078202426433563,
+          0.24373914301395416,
+          -0.3493714928627014
+        ]
+      }
+    },
+    "spatula_rifle": {
+      "name_cn": "锅铲步枪",
+      "glb": "assets/art/weapons/weapon_3d/components/spatula_rifle/wpn_spatula_rifle_visual_top3d_v003.glb",
+      "source": "art_source/weapons/weapon_3d/source/spatula_rifle/wpn_spatula_rifle_source_v003.blend",
+      "bounds_min": [
+        -0.2554520070552826,
+        -0.15596015751361847,
+        -1.0388381481170654
+      ],
+      "bounds_max": [
+        0.2554519772529602,
+        0.8087329864501953,
+        0.7161619663238525
+      ],
+      "presentation_scale_multiplier": 1.3,
+      "sockets": {
+        "grip": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "support_hand": [
+          0.0,
+          0.14557193756103515,
+          -0.540195837020874
+        ],
+        "muzzle": [
+          0.0,
+          0.32349319458007814,
+          -1.0388381481170654
+        ],
+        "muzzle_attachment": [
+          0.0,
+          0.32349319458007814,
+          -1.0388381481170654
+        ],
+        "scope": [
+          0.0,
+          0.8087329864501953,
+          -0.3947584962844849
+        ],
+        "magazine": [
+          0.0,
+          -0.11229131340980529,
+          -0.29087468147277834
+        ],
+        "stock": [
+          0.0,
+          0.16174659729003907,
+          0.7161619663238525
+        ],
+        "tactical": [
+          0.2554519772529602,
+          0.20218324661254883,
+          -0.4986423110961914
+        ],
+        "mutator": [
+          -0.2554520070552826,
+          0.20218324661254883,
+          -0.35320497035980225
+        ]
+      }
+    },
+    "frying_pan_cannon": {
+      "name_cn": "平底锅加农炮",
+      "glb": "assets/art/weapons/weapon_3d/components/frying_pan_cannon/wpn_frying_pan_cannon_visual_top3d_v003.glb",
+      "source": "art_source/weapons/weapon_3d/source/frying_pan_cannon/wpn_frying_pan_cannon_source_v003.blend",
+      "bounds_min": [
+        -0.44260698556900024,
+        0.018968872725963593,
+        -1.1412937641143799
+      ],
+      "bounds_max": [
+        0.44260698556900024,
+        1.2433443069458008,
+        0.4837062358856201
+      ],
+      "presentation_scale_multiplier": 1.3,
+      "sockets": {
+        "grip": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "support_hand": [
+          0.0,
+          0.22380197525024415,
+          -0.5934727573394776
+        ],
+        "muzzle": [
+          0.0,
+          0.49733772277832033,
+          -1.1412937641143799
+        ],
+        "muzzle_attachment": [
+          0.0,
+          0.49733772277832033,
+          -1.1412937641143799
+        ],
+        "scope": [
+          0.0,
+          1.2433443069458008,
+          -0.43369163036346436
+        ],
+        "magazine": [
+          0.0,
+          0.013657588362693786,
+          -0.3195622539520264
+        ],
+        "stock": [
+          0.0,
+          0.24866886138916017,
+          0.4837062358856201
+        ],
+        "tactical": [
+          0.44260698556900024,
+          0.3108360767364502,
+          -0.5478210067749023
+        ],
+        "mutator": [
+          -0.44260698556900024,
+          0.3108360767364502,
+          -0.3880398797988892
+        ]
+      }
+    },
+    "toaster_launcher": {
+      "name_cn": "烤面包机发射器",
+      "glb": "assets/art/weapons/weapon_3d/components/toaster_launcher/wpn_toaster_launcher_visual_top3d_v003.glb",
+      "source": "art_source/weapons/weapon_3d/source/toaster_launcher/wpn_toaster_launcher_source_v003.blend",
+      "bounds_min": [
+        -0.31130358576774597,
+        -0.0656546801328659,
+        -1.1552698612213135
+      ],
+      "bounds_max": [
+        0.31130361557006836,
+        1.2272377014160156,
+        0.5997301936149597
+      ],
+      "presentation_scale_multiplier": 1.3,
+      "sockets": {
+        "grip": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "support_hand": [
+          0.0,
+          0.2209027862548828,
+          -0.600740327835083
+        ],
+        "muzzle": [
+          0.0,
+          0.4908950805664063,
+          -1.1552698612213135
+        ],
+        "muzzle_attachment": [
+          0.0,
+          0.4908950805664063,
+          -1.1552698612213135
+        ],
+        "scope": [
+          0.0,
+          1.2272377014160156,
+          -0.43900254726409915
+        ],
+        "magazine": [
+          0.0,
+          -0.04727136969566345,
+          -0.3234755611419678
+        ],
+        "stock": [
+          0.0,
+          0.24544754028320315,
+          0.5997301936149597
+        ],
+        "tactical": [
+          0.31130361557006836,
+          0.3068094253540039,
+          -0.5545295333862305
+        ],
+        "mutator": [
+          -0.31130358576774597,
+          0.3068094253540039,
+          -0.3927917528152466
+        ]
+      }
+    },
+    "scope_cannon": {
+      "name_cn": "瞄准镜加农炮",
+      "glb": "assets/art/weapons/weapon_3d/components/scope_cannon/wpn_scope_cannon_visual_top3d_v003.glb",
+      "source": "art_source/weapons/weapon_3d/source/scope_cannon/wpn_scope_cannon_source_v003.blend",
+      "bounds_min": [
+        -0.3186517655849457,
+        -0.3962721526622772,
+        -1.0446319580078125
+      ],
+      "bounds_max": [
+        0.31865182518959045,
+        0.747890830039978,
+        0.8403680324554443
+      ],
+      "presentation_scale_multiplier": 1.3,
+      "sockets": {
+        "grip": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "support_hand": [
+          0.0,
+          0.13462034940719603,
+          -0.5432086181640625
+        ],
+        "muzzle": [
+          0.0,
+          0.29915633201599123,
+          -1.0446319580078125
+        ],
+        "muzzle_attachment": [
+          0.0,
+          0.29915633201599123,
+          -1.0446319580078125
+        ],
+        "scope": [
+          0.0,
+          0.747890830039978,
+          -0.39696014404296875
+        ],
+        "magazine": [
+          0.0,
+          -0.28531594991683956,
+          -0.2924969482421875
+        ],
+        "stock": [
+          0.0,
+          0.14957816600799562,
+          0.8403680324554443
+        ],
+        "tactical": [
+          0.31865182518959045,
+          0.1869727075099945,
+          -0.50142333984375
+        ],
+        "mutator": [
+          -0.3186517655849457,
+          0.1869727075099945,
+          -0.3551748657226563
+        ]
+      }
+    },
+    "popcorn_blaster": {
+      "name_cn": "爆米花爆能枪",
+      "glb": "assets/art/weapons/weapon_3d/components/popcorn_blaster/wpn_popcorn_blaster_visual_top3d_v003.glb",
+      "source": "art_source/weapons/weapon_3d/source/popcorn_blaster/wpn_popcorn_blaster_source_v003.blend",
+      "bounds_min": [
+        -0.3074952960014343,
+        0.06454860419034958,
+        -0.6184028387069702
+      ],
+      "bounds_max": [
+        0.3074953556060791,
+        1.6514226198196411,
+        0.8765972852706909
+      ],
+      "presentation_scale_multiplier": 1.3,
+      "sockets": {
+        "grip": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "support_hand": [
+          0.0,
+          0.29725607156753536,
+          -0.32156947612762454
+        ],
+        "muzzle": [
+          0.0,
+          0.6605690479278565,
+          -0.6184028387069702
+        ],
+        "muzzle_attachment": [
+          0.0,
+          0.6605690479278565,
+          -0.6184028387069702
+        ],
+        "scope": [
+          0.0,
+          1.6514226198196411,
+          -0.2349930787086487
+        ],
+        "magazine": [
+          0.0,
+          0.0464749950170517,
+          -0.17315279483795168
+        ],
+        "stock": [
+          0.0,
+          0.33028452396392827,
+          0.8765972852706909
+        ],
+        "tactical": [
+          0.3074953556060791,
+          0.4128556549549103,
+          -0.29683336257934567
+        ],
+        "mutator": [
+          -0.3074952960014343,
+          0.4128556549549103,
+          -0.2102569651603699
+        ]
+      }
+    },
+    "gumball_cannon": {
+      "name_cn": "口香糖机加农炮",
+      "glb": "assets/art/weapons/weapon_3d/components/gumball_cannon/wpn_gumball_cannon_visual_top3d_v003.glb",
+      "source": "art_source/weapons/weapon_3d/source/gumball_cannon/wpn_gumball_cannon_source_v003.blend",
+      "bounds_min": [
+        -0.536898672580719,
+        -0.13167794048786163,
+        -1.0420974493026733
+      ],
+      "bounds_max": [
+        0.536898672580719,
+        1.6459741592407227,
+        0.7129025459289551
+      ],
+      "presentation_scale_multiplier": 1.3,
+      "sockets": {
+        "grip": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "support_hand": [
+          0.0,
+          0.29627534866333005,
+          -0.5418906736373902
+        ],
+        "muzzle": [
+          0.0,
+          0.6583896636962892,
+          -1.0420974493026733
+        ],
+        "muzzle_attachment": [
+          0.0,
+          0.6583896636962892,
+          -1.0420974493026733
+        ],
+        "scope": [
+          0.0,
+          1.6459741592407227,
+          -0.39599703073501585
+        ],
+        "magazine": [
+          0.0,
+          -0.09480811715126038,
+          -0.29178728580474855
+        ],
+        "stock": [
+          0.0,
+          0.3291948318481446,
+          0.7129025459289551
+        ],
+        "tactical": [
+          0.536898672580719,
+          0.41149353981018066,
+          -0.5002067756652832
+        ],
+        "mutator": [
+          -0.536898672580719,
+          0.41149353981018066,
+          -0.35431313276290893
+        ]
+      }
+    },
+    "double_barrel_cannon": {
+      "name_cn": "双管炮",
+      "glb": "assets/art/weapons/weapon_3d/components/double_barrel_cannon/wpn_double_barrel_cannon_visual_top3d_v003.glb",
+      "source": "art_source/weapons/weapon_3d/source/double_barrel_cannon/wpn_double_barrel_cannon_source_v003.blend",
+      "bounds_min": [
+        -0.2316478043794632,
+        -0.08093897998332977,
+        -1.1405516862869263
+      ],
+      "bounds_max": [
+        0.23164783418178558,
+        0.8517190217971802,
+        0.6144483089447021
+      ],
+      "presentation_scale_multiplier": 1.3,
+      "sockets": {
+        "grip": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "support_hand": [
+          0.0,
+          0.15330942392349242,
+          -0.5930868768692017
+        ],
+        "muzzle": [
+          0.0,
+          0.3406876087188721,
+          -1.1405516862869263
+        ],
+        "muzzle_attachment": [
+          0.0,
+          0.3406876087188721,
+          -1.1405516862869263
+        ],
+        "scope": [
+          0.0,
+          0.8517190217971802,
+          -0.433409640789032
+        ],
+        "magazine": [
+          0.0,
+          -0.05827606558799744,
+          -0.3193544721603394
+        ],
+        "stock": [
+          0.0,
+          0.17034380435943605,
+          0.6144483089447021
+        ],
+        "tactical": [
+          0.23164783418178558,
+          0.21292975544929504,
+          -0.5474648094177246
+        ],
+        "mutator": [
+          -0.2316478043794632,
+          0.21292975544929504,
+          -0.387787573337555
+        ]
+      }
+    },
+    "soda_straw_blaster": {
+      "name_cn": "饮料管爆能枪",
+      "glb": "assets/art/weapons/weapon_3d/components/soda_straw_blaster/wpn_soda_straw_blaster_visual_top3d_v003.glb",
+      "source": "art_source/weapons/weapon_3d/source/soda_straw_blaster/wpn_soda_straw_blaster_source_v003.blend",
+      "bounds_min": [
+        -0.30909669399261475,
+        -0.15044178068637848,
+        -1.0179123878479004
+      ],
+      "bounds_max": [
+        0.30909669399261475,
+        1.179301381111145,
+        0.7370876669883728
+      ],
+      "presentation_scale_multiplier": 1.3,
+      "sockets": {
+        "grip": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "support_hand": [
+          0.0,
+          0.2122742486000061,
+          -0.5293144416809082
+        ],
+        "muzzle": [
+          0.0,
+          0.47172055244445804,
+          -1.0179123878479004
+        ],
+        "muzzle_attachment": [
+          0.0,
+          0.47172055244445804,
+          -1.0179123878479004
+        ],
+        "scope": [
+          0.0,
+          1.179301381111145,
+          -0.38680670738220213
+        ],
+        "magazine": [
+          0.0,
+          -0.1083180820941925,
+          -0.2850154685974121
+        ],
+        "stock": [
+          0.0,
+          0.23586027622222902,
+          0.7370876669883728
+        ],
+        "tactical": [
+          0.30909669399261475,
+          0.29482534527778625,
+          -0.48859794616699215
+        ],
+        "mutator": [
+          -0.30909669399261475,
+          0.29482534527778625,
+          -0.34609021186828615
+        ]
+      }
+    },
+    "crocodile_cannon": {
+      "name_cn": "鳄鱼加农炮",
+      "glb": "assets/art/weapons/weapon_3d/components/crocodile_cannon/wpn_crocodile_cannon_visual_top3d_v003.glb",
+      "source": "art_source/weapons/weapon_3d/source/crocodile_cannon/wpn_crocodile_cannon_source_v003.blend",
+      "bounds_min": [
+        -0.2439606785774231,
+        0.08584239333868027,
+        -1.1064131259918213
+      ],
+      "bounds_max": [
+        0.24396076798439026,
+        1.0566610097885132,
+        0.6485869884490967
+      ],
+      "presentation_scale_multiplier": 1.3,
+      "sockets": {
+        "grip": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "support_hand": [
+          0.0,
+          0.19019898176193237,
+          -0.5753348255157471
+        ],
+        "muzzle": [
+          0.0,
+          0.4226644039154053,
+          -1.1064131259918213
+        ],
+        "muzzle_attachment": [
+          0.0,
+          0.4226644039154053,
+          -1.1064131259918213
+        ],
+        "scope": [
+          0.0,
+          1.0566610097885132,
+          -0.4204369878768921
+        ],
+        "magazine": [
+          0.0,
+          0.06180652320384979,
+          -0.30979567527771
+        ],
+        "stock": [
+          0.0,
+          0.21133220195770264,
+          0.6485869884490967
+        ],
+        "tactical": [
+          0.24396076798439026,
+          0.2641652524471283,
+          -0.5310783004760742
+        ],
+        "mutator": [
+          -0.2439606785774231,
+          0.2641652524471283,
+          -0.3761804628372193
+        ]
+      }
+    },
+    "candy_sniper": {
+      "name_cn": "糖果狙击枪",
+      "glb": "assets/art/weapons/weapon_3d/components/candy_sniper/wpn_candy_sniper_visual_top3d_v003.glb",
+      "source": "art_source/weapons/weapon_3d/source/candy_sniper/wpn_candy_sniper_source_v003.blend",
+      "bounds_min": [
+        -0.16394062340259552,
+        -0.37620335817337036,
+        -1.2299858331680298
+      ],
+      "bounds_max": [
+        0.1639406532049179,
+        0.6738956570625305,
+        0.7850140929222107
+      ],
+      "presentation_scale_multiplier": 1.3,
+      "sockets": {
+        "grip": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "support_hand": [
+          0.0,
+          0.12130121827125549,
+          -0.6395926332473755
+        ],
+        "muzzle": [
+          0.0,
+          0.2695582628250122,
+          -1.2299858331680298
+        ],
+        "muzzle_attachment": [
+          0.0,
+          0.2695582628250122,
+          -1.2299858331680298
+        ],
+        "scope": [
+          0.0,
+          0.6738956570625305,
+          -0.46739461660385134
+        ],
+        "magazine": [
+          0.0,
+          -0.2708664178848266,
+          -0.3443960332870484
+        ],
+        "stock": [
+          0.0,
+          0.1347791314125061,
+          0.7850140929222107
+        ],
+        "tactical": [
+          0.1639406532049179,
+          0.16847391426563263,
+          -0.5903931999206543
+        ],
+        "mutator": [
+          -0.16394062340259552,
+          0.16847391426563263,
+          -0.4181951832771302
+        ]
+      }
+    },
+    "camera_blaster": {
+      "name_cn": "相机爆能枪",
+      "glb": "assets/art/weapons/weapon_3d/components/camera_blaster/wpn_camera_blaster_visual_top3d_v003.glb",
+      "source": "art_source/weapons/weapon_3d/source/camera_blaster/wpn_camera_blaster_source_v003.blend",
+      "bounds_min": [
+        -0.39459553360939026,
+        0.016466666013002396,
+        -0.7272776961326599
+      ],
+      "bounds_max": [
+        0.39459556341171265,
+        1.4726150035858154,
+        0.5077221989631653
+      ],
+      "presentation_scale_multiplier": 1.3,
+      "sockets": {
+        "grip": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "support_hand": [
+          0.0,
+          0.26507070064544674,
+          -0.3781844019889832
+        ],
+        "muzzle": [
+          0.0,
+          0.5890460014343262,
+          -0.7272776961326599
+        ],
+        "muzzle_attachment": [
+          0.0,
+          0.5890460014343262,
+          -0.7272776961326599
+        ],
+        "scope": [
+          0.0,
+          1.4726150035858154,
+          -0.27636552453041074
+        ],
+        "magazine": [
+          0.0,
+          0.011855999529361724,
+          -0.20363775491714478
+        ],
+        "stock": [
+          0.0,
+          0.2945230007171631,
+          0.5077221989631653
+        ],
+        "tactical": [
+          0.39459556341171265,
+          0.36815375089645386,
+          -0.34909329414367674
+        ],
+        "mutator": [
+          -0.39459553360939026,
+          0.36815375089645386,
+          -0.2472744166851044
+        ]
+      }
+    },
+    "tissue_box_cannon": {
+      "name_cn": "纸巾盒加农炮",
+      "glb": "assets/art/weapons/weapon_3d/components/tissue_box_cannon/wpn_tissue_box_cannon_visual_top3d_v003.glb",
+      "source": "art_source/weapons/weapon_3d/source/tissue_box_cannon/wpn_tissue_box_cannon_source_v003.blend",
+      "bounds_min": [
+        -0.26584187150001526,
+        -0.05423745512962341,
+        -1.0511448383331299
+      ],
+      "bounds_max": [
+        0.26584190130233765,
+        1.0261725187301636,
+        0.5738551616668701
+      ],
+      "presentation_scale_multiplier": 1.3,
+      "sockets": {
+        "grip": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "support_hand": [
+          0.0,
+          0.18471105337142943,
+          -0.5465953159332275
+        ],
+        "muzzle": [
+          0.0,
+          0.41046900749206544,
+          -1.0511448383331299
+        ],
+        "muzzle_attachment": [
+          0.0,
+          0.41046900749206544,
+          -1.0511448383331299
+        ],
+        "scope": [
+          0.0,
+          1.0261725187301636,
+          -0.39943503856658935
+        ],
+        "magazine": [
+          0.0,
+          -0.03905096769332886,
+          -0.2943205547332764
+        ],
+        "stock": [
+          0.0,
+          0.20523450374603272,
+          0.5738551616668701
+        ],
+        "tactical": [
+          0.26584190130233765,
+          0.2565431296825409,
+          -0.5045495223999024
+        ],
+        "mutator": [
+          -0.26584187150001526,
+          0.2565431296825409,
+          -0.3573892450332642
+        ]
+      }
+    },
+    "broom_rifle": {
+      "name_cn": "扫帚步枪",
+      "glb": "assets/art/weapons/weapon_3d/components/broom_rifle/wpn_broom_rifle_visual_top3d_v003.glb",
+      "source": "art_source/weapons/weapon_3d/source/broom_rifle/wpn_broom_rifle_source_v003.blend",
+      "bounds_min": [
+        -0.17655611038208008,
+        -0.25830820202827454,
+        -1.1447153091430664
+      ],
+      "bounds_max": [
+        0.17655616998672485,
+        0.4481789171695709,
+        0.6102846264839172
+      ],
+      "presentation_scale_multiplier": 1.3,
+      "sockets": {
+        "grip": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "support_hand": [
+          0.0,
+          0.08067220509052277,
+          -0.5952519607543946
+        ],
+        "muzzle": [
+          0.0,
+          0.17927156686782839,
+          -1.1447153091430664
+        ],
+        "muzzle_attachment": [
+          0.0,
+          0.17927156686782839,
+          -1.1447153091430664
+        ],
+        "scope": [
+          0.0,
+          0.4481789171695709,
+          -0.4349918174743652
+        ],
+        "magazine": [
+          0.0,
+          -0.18598190546035767,
+          -0.3205202865600586
+        ],
+        "stock": [
+          0.0,
+          0.08963578343391419,
+          0.6102846264839172
+        ],
+        "tactical": [
+          0.17655616998672485,
+          0.11204472929239273,
+          -0.5494633483886718
+        ],
+        "mutator": [
+          -0.17655611038208008,
+          0.11204472929239273,
+          -0.3892032051086426
+        ]
+      }
+    },
+    "fan_blaster": {
+      "name_cn": "风扇爆能枪",
+      "glb": "assets/art/weapons/weapon_3d/components/fan_blaster/wpn_fan_blaster_visual_top3d_v003.glb",
+      "source": "art_source/weapons/weapon_3d/source/fan_blaster/wpn_fan_blaster_source_v003.blend",
+      "bounds_min": [
+        -0.20515626668930054,
+        0.03046875260770321,
+        -0.9709374904632568
+      ],
+      "bounds_max": [
+        0.20515628159046173,
+        1.0055208206176758,
+        0.5240625143051147
+      ],
+      "presentation_scale_multiplier": 1.3,
+      "sockets": {
+        "grip": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "support_hand": [
+          0.0,
+          0.18099374771118162,
+          -0.5048874950408936
+        ],
+        "muzzle": [
+          0.0,
+          0.4022083282470703,
+          -0.9709374904632568
+        ],
+        "muzzle_attachment": [
+          0.0,
+          0.4022083282470703,
+          -0.9709374904632568
+        ],
+        "scope": [
+          0.0,
+          1.0055208206176758,
+          -0.3689562463760376
+        ],
+        "magazine": [
+          0.0,
+          0.021937501877546308,
+          -0.27186249732971196
+        ],
+        "stock": [
+          0.0,
+          0.20110416412353516,
+          0.5240625143051147
+        ],
+        "tactical": [
+          0.20515628159046173,
+          0.25138020515441895,
+          -0.46604999542236325
+        ],
+        "mutator": [
+          -0.20515626668930054,
+          0.25138020515441895,
+          -0.33011874675750735
+        ]
+      }
+    },
+    "hair_dryer": {
+      "name_cn": "吹风机",
+      "glb": "assets/art/weapons/weapon_3d/components/hair_dryer/wpn_hair_dryer_visual_top3d_v003.glb",
+      "source": "art_source/weapons/weapon_3d/source/hair_dryer/wpn_hair_dryer_source_v003.blend",
+      "bounds_min": [
+        -0.24742408096790314,
+        -0.14651910960674286,
+        -0.690759539604187
+      ],
+      "bounds_max": [
+        0.24742402136325836,
+        0.7418806552886963,
+        0.5442404747009277
+      ],
+      "presentation_scale_multiplier": 1.3,
+      "sockets": {
+        "grip": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "support_hand": [
+          0.0,
+          0.13353851795196534,
+          -0.35919496059417727
+        ],
+        "muzzle": [
+          0.0,
+          0.2967522621154785,
+          -0.690759539604187
+        ],
+        "muzzle_attachment": [
+          0.0,
+          0.2967522621154785,
+          -0.690759539604187
+        ],
+        "scope": [
+          0.0,
+          0.7418806552886963,
+          -0.2624886250495911
+        ],
+        "magazine": [
+          0.0,
+          -0.10549375891685485,
+          -0.19341267108917237
+        ],
+        "stock": [
+          0.0,
+          0.14837613105773925,
+          0.5442404747009277
+        ],
+        "tactical": [
+          0.24742402136325836,
+          0.18547016382217407,
+          -0.33156457901000974
+        ],
+        "mutator": [
+          -0.24742408096790314,
+          0.18547016382217407,
+          -0.2348582434654236
+        ]
+      }
+    }
+  },
+  "decor_props": {
+    "workshop_stool": {
+      "name_cn": "赛博维修圆凳",
+      "category": "decor_prop",
+      "glb": "assets/art/props/base_world_3d/components/workshop_stool/prp_base_workshop_stool_visual_top3d_v003.glb",
+      "source": "art_source/props/base_world_3d/source/workshop_stool/prp_base_workshop_stool_source_v003.blend",
+      "runtime": "assets/art/props/base_world_3d/runtime/workshop_stool/prp_base_workshop_stool_root_top3d_v001.tscn",
+      "bounds_min": [
+        -0.6376745700836182,
+        0.0,
+        -0.6189379692077637
+      ],
+      "bounds_max": [
+        0.6376745104789734,
+        0.8568736910820007,
+        0.5930769443511963
+      ],
+      "presentation_scale_multiplier": 1.0,
+      "interactive": false,
+      "standalone": true
+    },
+    "mission_command_chair": {
+      "name_cn": "战术指挥椅",
+      "category": "decor_prop",
+      "glb": "assets/art/props/base_world_3d/components/mission_command_chair/prp_base_mission_command_chair_visual_top3d_v003.glb",
+      "source": "art_source/props/base_world_3d/source/mission_command_chair/prp_base_mission_command_chair_source_v003.blend",
+      "runtime": "assets/art/props/base_world_3d/runtime/mission_command_chair/prp_base_mission_command_chair_root_top3d_v001.tscn",
+      "bounds_min": [
+        -0.6272826194763184,
+        0.0,
+        -0.6130872964859009
+      ],
+      "bounds_max": [
+        0.6272825598716736,
+        1.349503517150879,
+        0.5901099443435669
+      ],
+      "presentation_scale_multiplier": 1.0,
+      "interactive": false,
+      "standalone": true
+    }
+  },
+  "base_facility_v021_optimized_packages": {
+    "asset_id": "ENV-BASE99-OPTIMIZED-PACKAGES-V021",
+    "version": "v021",
+    "package_count": 30,
+    "import_ledger": "art_source/environments/base_facility_3d/source/env_base99_optimized_packages_v021_import_manifest.json",
+    "source_blend": "art_source/design/blender/base_facility_layout/source/base_facility_runtime_layout_hq_v021.blend",
+    "runtime_roots": {
+      "remaining": "assets/art/environments/base_facility_3d/runtime/env_base99_remaining_facilities_v021/env_base99_remaining_facilities_root_top3d_v004.tscn",
+      "wall": "assets/art/environments/base_facility_3d/runtime/env_base99_wall_contents_v021/env_base99_wall_contents_root_top3d_v003.tscn",
+      "floor": "assets/art/environments/base_facility_3d/runtime/env_base99_floor_visuals_v021/env_base99_floor_visuals_root_top3d_v004.tscn",
+      "layout": "assets/art/environments/base_facility_3d/runtime/env_base_facility_art_layout_top3d_v001.tscn"
+    }
+  },
+  "base_facility_door_visuals_v021": {
+    "asset_id": "ENV-BASE99-DOOR-VISUALS-V021",
+    "version": "v021",
+    "package_count": 4,
+    "import_ledger": "art_source/environments/base_facility_3d/source/env_base99_door_visuals_v021_import_manifest.json",
+    "source_blend": "art_source/design/blender/base_facility_layout/source/base_facility_runtime_layout_hq_v021.blend",
+    "runtime_roots": {
+      "wall_door": "assets/art/environments/base_facility_3d/runtime/env_base99_wall_door_5x12/env_base99_wall_door_5x12_root_top3d_v004.tscn",
+      "door_lift": "assets/art/environments/base_facility_3d/runtime/env_base99_door_lift_2p2x2p5/env_base99_door_lift_2p2x2p5_root_top3d_v002.tscn"
+    }
+  },
+  "base_facility_loft_layout_v021": {
+    "asset_id": "ENV-BASE99-LOFT-LAYOUT-V021",
+    "version": "v021",
+    "revision": "v021_loft_layout_adjustment_001",
+    "package_count": 3,
+    "layout_ledger": "art_source/environments/base_facility_3d/source/env_base99_loft_layout_v021_manifest.json",
+    "runtime_scene": "assets/art/environments/base_facility_3d/runtime/env_base99_remaining_facilities_v021/env_base99_remaining_facilities_root_top3d_v004.tscn",
+    "export_policy": "layout_only_no_glb_reexport"
+  },
+  "base_facility_updates_v022": {
+    "asset_id": "ENV-BASE99-V022-UPDATES",
+    "version": "v022",
+    "package_count": 14,
+    "import_manifest": "art_source/environments/base_facility_3d/source/env_base99_updates_v022_import_manifest.json",
+    "runtime": {
+      "remaining": "assets/art/environments/base_facility_3d/runtime/env_base99_remaining_facilities_v021/env_base99_remaining_facilities_root_top3d_v004.tscn",
+      "wall": "assets/art/environments/base_facility_3d/runtime/env_base99_wall_contents_v021/env_base99_wall_contents_root_top3d_v003.tscn",
+      "stair": "assets/art/environments/base_facility_3d/runtime/env_base99_stair_l_z5/env_base99_stair_l_z5_root_top3d_v006.tscn"
+    }
+  },
+  "base_facility_scene_vfx": {
+    "asset_id": "VFX-BASE99-SCENE-DUST-V001",
+    "version": "v001",
+    "category": "scene_vfx",
+    "scene": "assets/art/vfx/environment_3d/base_facility_dust_particles/vfx_base99_dust_particles_root_top3d_v001.tscn",
+    "replaces": "64_光束尘埃动效组_资产包",
+    "implementation": "Godot GPUParticles3D",
+    "managed_separately": true
+  },
+  "base_facility_stair_bed_v023": {
+    "asset_id": "ENV-BASE99-V023-STAIR-BED",
+    "version": "v023",
+    "package_count": 2,
+    "import_manifest": "art_source/environments/base_facility_3d/source/env_base99_stair_bed_v023_import_manifest.json",
+    "runtime": {
+      "bed_prefab": "assets/art/environments/base_facility_3d/runtime/env_base99_remaining_facilities_v021/loft_bed_and_bedding/loft_bed_and_bedding_root_top3d_v004.tscn",
+      "stair_prefab": "assets/art/environments/base_facility_3d/runtime/env_base99_stair_l_z5/env_base99_stair_l_z5_root_top3d_v006.tscn",
+      "remaining_assembly": "assets/art/environments/base_facility_3d/runtime/env_base99_remaining_facilities_v021/env_base99_remaining_facilities_root_top3d_v004.tscn",
+      "art_layout": "assets/art/environments/tower_zones/base/runtime/zone_base_v002.tscn"
+    }
+  },
+  "base_rollup_reimport_v024": {
+    "package": "42_BASE_CAMP大型卷帘主门_资产包",
+    "source": "art_source/design/blender/base_facility_layout/source/base_facility_runtime_layout_hq_v024.blend",
+    "source_sha256": "611e7015c8a8225dd19f7f9c8bdf33eec808c12f7a78f27f7fb8cc2ebf30d174",
+    "derived": "art_source/design/blender/base_facility_layout/export/v024/base_facility_runtime_layout_hq-v024-rollup_main_door.blend",
+    "glb": "assets/art/environments/base_facility_3d/components/env_base99_remaining_facilities_v021/base_camp_rollup_main_door/base_camp_rollup_main_door_visual_top3d_v002.glb",
+    "glb_sha256": "896ca6d605c5f5e6c494ae7790cc5e463523eb639f866f712442d3ec197bf9af",
+    "triangles_before": 17760,
+    "triangles_after": 14972,
+    "bbox_min": [
+      1.850000023841858,
+      3.929999828338623,
+      0.8799999952316284
+    ],
+    "bbox_max": [
+      8.289999961853027,
+      4.839999675750732,
+      3.799999952316284
+    ],
+    "mesh_count": 70,
+    "runtime_scene": "assets/art/environments/base_facility_3d/runtime/env_base99_remaining_facilities_v021/base_camp_rollup_main_door/base_camp_rollup_main_door_root_top3d_v002.tscn",
+    "assembly": "assets/art/environments/base_facility_3d/runtime/env_base99_remaining_facilities_v021/env_base99_remaining_facilities_root_top3d_v004.tscn",
+    "collision_policy": "unchanged box: optimized bounds match old box (6.44,2.92,0.91) at (5.07,2.34,-4.385)",
+    "verification": {
+      "godot_reimport": "passed",
+      "standalone_scene": "passed: 70 meshes, shared PaletteUV material references, and original door blocker",
+      "preview": "outputs/verification/rollup_reimport_v024.png"
+    },
+    "status": "approved_runtime"
+  },
+  "base99_door_wall_height12": {
+    "asset_id": "ENV-BASE99-WALL-DOOR-5X12",
+    "source": "art_source/environments/base_facility_3d/source/wall_height12/env_base99_wall_door_5x12_source_v004.blend",
+    "derived_export": "art_source/environments/base_facility_3d/source/wall_height12/env_base99_wall_door_5x12_source_v004.blend",
+    "glb": "assets/art/environments/base_facility_3d/components/env_base99_wall_door_5x12/env_base99_wall_door_5x12_visual_top3d_v004.glb",
+    "runtime_scene": "assets/art/environments/base_facility_3d/runtime/env_base99_wall_door_5x12/env_base99_wall_door_5x12_root_top3d_v004.tscn",
+    "import_ledger": "art_source/environments/base_facility_3d/source/env_base99_door_wall_palette_v025_import_manifest.json",
+    "scope": "Shared east/west Base99 door-wall visual; PaletteUV only."
+  },
+  "base99_facility_gameplay_bindings_v001": {
+    "contract": "BaseFacility3D gameplay wrapper preserves source package transform and collision",
+    "assembly": "assets/art/environments/base_facility_3d/runtime/env_base99_remaining_facilities_v021/env_base99_remaining_facilities_root_top3d_v004.tscn",
+    "interaction_margin_m": 0.8,
+    "interaction_shape_locked": true,
+    "bindings": [
+      {
+        "facility_id": "base_vending",
+        "display_name": "自动贩卖机",
+        "asset_package": "assets/art/environments/base_facility_3d/runtime/env_base99_remaining_facilities_v021/east_supply_24h_station/east_supply_24h_station_root_top3d_v001.tscn",
+        "runtime_wrapper": "assets/art/environments/base_facility_3d/runtime/env_base99_remaining_facilities_v021/east_supply_24h_station/east_supply_24h_station_facility_top3d_v001.tscn",
+        "menu_scene": "res://scenes/BaseVendingMenu.tscn",
+        "source_collection": "72_SUPPLY24H自动补给机_资产包",
+        "source_number": "72",
+        "interaction_shape": "4.720001×6.05×4.7m"
+      },
+      {
+        "facility_id": "vault",
+        "display_name": "保险柜",
+        "asset_package": "assets/art/environments/base_facility_3d/runtime/env_base99_remaining_facilities_v021/narrow_battery_cabinet/narrow_battery_cabinet_root_top3d_v001.tscn",
+        "runtime_wrapper": "assets/art/environments/base_facility_3d/runtime/env_base99_remaining_facilities_v021/narrow_battery_cabinet/narrow_battery_cabinet_facility_top3d_v001.tscn",
+        "menu_scene": "res://scenes/VaultMenu.tscn",
+        "source_collection": "47_窄型电池柜_资产包",
+        "source_number": "47",
+        "interaction_shape": "3.18×4.82×2.39m"
+      },
+      {
+        "facility_id": "monster_archive",
+        "display_name": "怪物档案室",
+        "asset_package": "assets/art/environments/base_facility_3d/runtime/env_base99_remaining_facilities_v021/weapon_workshop_station/weapon_workshop_station_root_top3d_v003.tscn",
+        "runtime_wrapper": "assets/art/environments/base_facility_3d/runtime/env_base99_remaining_facilities_v021/weapon_workshop_station/weapon_workshop_station_facility_top3d_v001.tscn",
+        "menu_scene": "res://scenes/MonsterArchiveMenu.tscn",
+        "source_collection": "49_02_游戏输出_整合模型_v020",
+        "source_number": "49",
+        "interaction_shape": "3.523101×5.31×7.35m"
+      },
+      {
+        "facility_id": "fate_collection",
+        "display_name": "命运卡收藏室",
+        "asset_package": "assets/art/environments/base_facility_3d/runtime/env_base99_remaining_facilities_v021/loft_computer_workstation/loft_computer_workstation_root_top3d_v002.tscn",
+        "runtime_wrapper": "assets/art/environments/base_facility_3d/runtime/env_base99_remaining_facilities_v021/loft_computer_workstation/loft_computer_workstation_facility_top3d_v001.tscn",
+        "menu_scene": "res://scenes/FateCardCollectionMenu.tscn",
+        "source_collection": "42__02_游戏输出_整合模型",
+        "source_number": "42",
+        "interaction_shape": "9.134999×4.64×3.005m"
+      },
+      {
+        "facility_id": "base_recovery",
+        "display_name": "状态恢复舱",
+        "asset_package": "assets/art/environments/base_facility_3d/runtime/env_base99_remaining_facilities_v021/medical_cabinet/medical_cabinet_root_top3d_v001.tscn",
+        "runtime_wrapper": "assets/art/environments/base_facility_3d/runtime/env_base99_remaining_facilities_v021/medical_cabinet/medical_cabinet_facility_top3d_v001.tscn",
+        "menu_scene": "res://scenes/BaseRecoveryMenu.tscn",
+        "source_collection": "45_MEDICAL医疗柜_资产包",
+        "source_number": "45",
+        "interaction_shape": "3.18×4.93×2.39m"
+      },
+      {
+        "facility_id": "avatar_wardrobe",
+        "display_name": "角色衣柜",
+        "asset_package": "assets/art/environments/base_facility_3d/runtime/env_base99_remaining_facilities_v021/loft_lounge_sofa/loft_lounge_sofa_root_top3d_v002.tscn",
+        "runtime_wrapper": "assets/art/environments/base_facility_3d/runtime/env_base99_remaining_facilities_v021/loft_lounge_sofa/loft_lounge_sofa_facility_top3d_v001.tscn",
+        "menu_scene": "res://scenes/ui/WardrobeMenu3D.tscn",
+        "source_collection": "36_墨绿三人休闲沙发_资产包",
+        "source_number": "36",
+        "interaction_shape": "6.42×3.431646×3.481379m"
+      }
+    ]
+  },
+  "base99_source_policy": {
+    "effective_date": "2026-09-12",
+    "authority": "current Blender source files on disk",
+    "selection_rule": "use the current source file; after a source update use the highest numeric v### as the formal source",
+    "current_master_source": "art_source/design/blender/base_facility_layout/source/base_facility_runtime_layout_hq_v026.blend",
+    "current_runtime_strategy": "incremental runtime asset versions remain valid; ledger records both current master source and actual runtime version",
+    "material_roles": [
+      "01_精工金属_紫色骨架",
+      "02_细腻哑光_青绿大面",
+      "03_清漆反光_紫粉点缀",
+      "04_柔和自发光_UI灯光"
+    ],
+    "material_history_forbidden": [
+      ".001/.002 suffixes",
+      "_v018公共色盘",
+      "_全息增强_v022",
+      "_117转角墙外链修正版"
+    ]
+  }
+}

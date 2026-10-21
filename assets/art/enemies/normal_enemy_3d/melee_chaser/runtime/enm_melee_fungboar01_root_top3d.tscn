@@ -1,0 +1,16 @@
+[gd_scene load_steps=3 format=3]
+
+[ext_resource type="Script" path="res://assets/art/enemies/normal_enemy_3d/melee_chaser/runtime/melee_chaser_formal_visual.gd" id="1_script"]
+[ext_resource type="PackedScene" path="res://assets/art/enemies/normal_enemy_3d/melee_chaser/components/enm_melee_fungboar01_visual_top3d.glb" id="2_glb"]
+
+[node name="MeleeChaserFormalVisual" type="Node3D"]
+script = ExtResource("1_script")
+metadata/asset_id = "ENM-MELEE-FUNGBOAR01"
+metadata/content_id = "melee_chaser"
+metadata/asset_version = "v004"
+metadata/skeleton_id = "SKEL-MELEE-ZOMBIE01-003"
+metadata/presentation_only = true
+metadata/collision_owner = "Enemy3D"
+metadata/godot_forward = "-Z"
+
+[node name="VisualGLB" parent="." instance=ExtResource("2_glb")]

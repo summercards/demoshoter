@@ -1,0 +1,277 @@
+class_name BaseWorld3D
+extends Node3D
+## 游戏入口的正式 3D 基地地图。设施、入口和返回契约经共享服务层持有，
+## 只替换空间、角色、相机与表现层；战斗副本继续作为独立场景按需加载。
+
+const FacilityCatalog = preload("res://src/base/BaseFacilityCatalog.gd")
+
+@onready var player: Player3D = $Player3D
+@onready var environment_kit: BaseWorld3DEnvironment = $EnvironmentKit
+@onready var runs_label: Label = $HUD/InfoPanel/VBox/RunsLabel
+@onready var extraction_label: Label = $HUD/InfoPanel/VBox/ExtractionLabel
+@onready var kills_label: Label = $HUD/InfoPanel/VBox/KillsLabel
+@onready var points_label: Label = $HUD/InfoPanel/VBox/PointsLabel
+@onready var loot_label: Label = $HUD/InfoPanel/VBox/LootLabel
+@onready var state_label: Label = $HUD/StatePanel/StateLabel
+@onready var status_label: Label = $HUD/StatusPanel/StatusLabel
+
+var _active_menu: CanvasLayer = null
+var _scene_transitioning := false
+
+
+func _ready() -> void:
+	Global.clear_pause_reasons()
+	player.set_combat_enabled(false)
+	player.presentation_state_changed.connect(_on_player_state_changed)
+	# 延迟 0.1s 触发基地音乐，避免与上一场景 _exit_tree 的状态写回抢时序。
+	_start_base_music_with_delay()
+
+	for facility in get_tree().get_nodes_in_group("base_facility"):
+		if facility is BaseFacility3D and is_ancestor_of(facility):
+			# 设施可能换场景，延迟到本次输入派发结束后处理。
+			facility.activated.connect(_on_facility_activated, CONNECT_DEFERRED)
+	for entrance in get_tree().get_nodes_in_group("dungeon_entrance"):
+		if entrance is DungeonEntrance3D and is_ancestor_of(entrance):
+			# 入口也会直接替换整棵场景树；不要在 unhandled_input 调用栈内同步摘除旧 Viewport。
+			entrance.activated.connect(_on_dungeon_entrance_activated, CONNECT_DEFERRED)
+	_refresh_base_status()
+	_refresh_facilities()
+	_restore_world_position()
+	_on_player_state_changed(player.get_presentation_state(), {})
+	_apply_prism_base_hud()
+
+
+## 99F 基地世界常驻 HUD 收编到「棱镜线框」。
+##
+## 场景里原本内嵌了三个 **8px 圆角 + 霓虹青描边** 的深蓝卡片
+## （`StyleInfo` / `StyleStatus`，见 `scenes/BaseWorld3D.tscn`）——那是上一代语言。
+## 这里在运行时把它们换成**无背框**的棱镜 HUD（规范 §5.9 定案：常驻 HUD 压在实景上，
+## 任何半透明卡片都是实打实地吃视野），可读性由真描边兜底。
+##
+## 为什么写在脚本里而不是直接改 .tscn 的 sub_resource：
+## 除了样式盒，还要给文字套**宽字距字体**并加描边 —— 这些是主题覆盖而不是样式盒，
+## 逐个写在场景里会散。
+##
+## ⚠️ 两个坑：
+## 1. `HUD` 是 **`CanvasLayer`**，不是 `Control`。早先写成 `get_node_or_null("HUD") as Control`
+##    会静默拿到 `null`，整段收口变成空操作（2026-10-17 实机截图发现基地面板仍是 8px 圆角旧卡片）。
+## 2. 只逐面板收口，**不要**从 `HUD` 整棵树递归 —— `HUD/PauseOverlay` 是 wave 1 已定标的
+##    `PauseMenu3D` 成品，`prism_normalize_label_colors` 只认 `ui_prism_exempt`、不认
+##    `ui_style_exempt`，从上面刷一遍会把它改回未定标状态。
+##
+## ⚠️ 节点名与路径（`HUD/InfoPanel` / `HUD/StatePanel` / `HUD/StatusPanel`）保持不变 ——
+## `probe_test_level_99_gameplay` 按名索引 `HUD/StatusPanel`。
+func _apply_prism_base_hud() -> void:
+	var hud := get_node_or_null("HUD") as CanvasLayer
+	if hud == null:
+		return
+	for panel_name in ["InfoPanel", "StatePanel", "StatusPanel"]:
+		var panel := hud.get_node_or_null(panel_name) as PanelContainer
+		if panel == null:
+			continue
+		var previous := panel.get_theme_stylebox("panel")
+		var style := UIStyleFactory.make_prism_bare_style()
+		# 布局零回归：逐边沿用场景旧样式盒的**生效**内容边距（`get_content_margin`
+		# 会把 `-1` 解析成边框宽度），不自己拍一个数。
+		if previous != null:
+			style.content_margin_left = previous.get_content_margin(SIDE_LEFT)
+			style.content_margin_top = previous.get_content_margin(SIDE_TOP)
+			style.content_margin_right = previous.get_content_margin(SIDE_RIGHT)
+			style.content_margin_bottom = previous.get_content_margin(SIDE_BOTTOM)
+		panel.add_theme_stylebox_override("panel", style)
+		_prism_tone_base_hud_text(panel)
+	var hint := hud.get_node_or_null("ControlHint") as Label
+	if hint != null:
+		UIStyleFactory.prism_normalize_label_colors(hint)
+		# ⚠️ `apply_prism_outline_recursive` 只扫**后代**、不含传进去的 root 自己，
+		# 所以裸 Label 必须就地补一次描边，不能指望递归帮它加。
+		hint.add_theme_constant_override("outline_size", 3)
+		hint.add_theme_color_override("font_outline_color", Color(0, 0, 0, 0.62))
+
+
+## HUD 文本收口：先归一到棱镜语义色，再补 4px 深描边 ——
+## 基地实景是明亮低多边形，近白字不加描边会直接掉对比度（规范 §5.9 的兜底手段）。
+func _prism_tone_base_hud_text(root: Node) -> void:
+	UIStyleFactory.prism_normalize_label_colors(root)
+	UIStyleFactory.apply_prism_outline_recursive(root, 4.0, 0.62)
+
+
+func _start_base_music_with_delay() -> void:
+	var music_mgr := get_node_or_null("/root/MusicManager")
+	if music_mgr == null:
+		return
+	# 保证上一场景的 fade-out / stop() 有时间完成，不被新的 play() kill。
+	await get_tree().create_timer(0.1).timeout
+	music_mgr.play("base_passion")
+
+
+func _on_facility_activated(facility: BaseFacility3D) -> void:
+	if _active_menu != null and is_instance_valid(_active_menu):
+		return
+	var snapshot := BaseManager.get_facility_snapshot(facility.facility_id)
+	if not bool(snapshot.get("available", false)):
+		status_label.text = "%s：%s" % [
+			facility.display_name,
+			str(snapshot.get("availability_reason", "设施不可用")),
+		]
+		return
+	status_label.text = "%s｜%s\n%s" % [
+		str(snapshot.get("display_name", facility.display_name)),
+		str(snapshot.get("summary", "")),
+		str(snapshot.get("description", facility.description)),
+	]
+	match str(snapshot.get("action_kind", FacilityCatalog.ACTION_INFO)):
+		FacilityCatalog.ACTION_MENU:
+			_open_menu(str(snapshot.get("action_path", "")), facility)
+		FacilityCatalog.ACTION_SCENE:
+			_load_scene(str(snapshot.get("action_path", "")), facility.target_floor)
+		FacilityCatalog.ACTION_INFO:
+			status_label.text += "\n四条远征路线均从基地外道路进入；训练场不计入行动结算。"
+
+
+func _open_menu(scene_path: String, facility: BaseFacility3D = null) -> void:
+	if scene_path.is_empty():
+		status_label.text = "该设施尚未接入功能。"
+		return
+	var menu_scene := load(scene_path) as PackedScene
+	if menu_scene == null:
+		status_label.text = "设施功能加载失败。"
+		return
+	var menu := menu_scene.instantiate() as CanvasLayer
+	if menu == null:
+		push_warning("[BaseWorld3D] Facility menu is not a CanvasLayer: %s" % scene_path)
+		return
+	if menu is BaseMenu:
+		menu.overlay_mode = true
+	if menu.has_method("set_player"):
+		menu.call("set_player", player)
+	if menu.has_method("set_facility"):
+		menu.call("set_facility", facility)
+	# 设施菜单必须覆盖基地 HUD，避免状态面板与菜单内容重叠。
+	menu.layer = 50
+	_active_menu = menu
+	player.set_input_locked(true)
+	add_child(menu)
+	menu.tree_exited.connect(_on_active_menu_closed)
+
+
+func _load_scene(scene_path: String, floor: int = 0) -> void:
+	if _scene_transitioning:
+		return
+	if scene_path.is_empty() or not ResourceLoader.exists(scene_path, "PackedScene"):
+		status_label.text = "目标地图尚未配置。"
+		return
+	_scene_transitioning = true
+	if floor > 0:
+		LevelSelect.selected_floor = floor
+		LevelSelect.selection_made = true
+	var change_error := get_tree().change_scene_to_file(scene_path)
+	if change_error != OK:
+		_scene_transitioning = false
+		push_error("[BaseWorld3D] Scene transition failed: %s" % error_string(change_error))
+
+
+func _on_dungeon_entrance_activated(entrance: DungeonEntrance3D) -> void:
+	if _scene_transitioning:
+		return
+	if entrance.target_scene_path.is_empty() or not ResourceLoader.exists(entrance.target_scene_path, "PackedScene"):
+		status_label.text = "这个入口仍被封锁。"
+		return
+	_scene_transitioning = true
+	LevelSelect.prepare_dungeon_entry(entrance.target_floor, entrance.entrance_id)
+	status_label.text = "进入 %s……" % entrance.display_name
+	var change_error := get_tree().change_scene_to_file(entrance.target_scene_path)
+	if change_error != OK:
+		_scene_transitioning = false
+		push_error("[BaseWorld3D] Dungeon transition failed: %s" % error_string(change_error))
+
+
+func _restore_world_position() -> void:
+	var entrance_id := str(LevelSelect.return_entrance_id)
+	if entrance_id.is_empty():
+		return
+	for entrance in get_tree().get_nodes_in_group("dungeon_entrance"):
+		if entrance is DungeonEntrance3D and is_ancestor_of(entrance) and entrance.entrance_id == entrance_id:
+			player.global_position = entrance.global_position + Vector3(0, 0, 2.8)
+			status_label.text = "你回到了 %s 门外。" % entrance.display_name
+			break
+	LevelSelect.return_entrance_id = ""
+
+
+func _on_active_menu_closed() -> void:
+	_active_menu = null
+	if player != null and is_instance_valid(player):
+		player.set_input_locked(false)
+	if not is_inside_tree():
+		return
+	_refresh_base_status()
+	_refresh_facilities()
+
+
+func try_close_modal_for_pause() -> bool:
+	if _active_menu == null or not is_instance_valid(_active_menu):
+		return false
+	_active_menu.queue_free()
+	return true
+
+
+func _on_player_state_changed(state_id: String, _context: Dictionary) -> void:
+	var labels := {
+		"idle": "待命",
+		"moving": "机动",
+		"dashing": "突进",
+		"hurt": "受创",
+		"locked": "交互锁定",
+		"dead": "生命终止",
+	}
+	state_label.text = "3D 姿态 · %s" % str(labels.get(state_id, state_id))
+
+
+func _refresh_base_status() -> void:
+	if BaseManager == null:
+		return
+	var profile := BaseManager.get_profile_snapshot()
+	runs_label.text = "总局数: %d" % int(profile.get("total_runs", 0))
+	extraction_label.text = "成功撤离: %d" % int(profile.get("successful_extractions", 0))
+	kills_label.text = "总击杀: %d" % int(profile.get("total_kills", 0))
+	points_label.text = "金币: ◈ %d" % BaseManager.get_extraction_points()
+	var loot_count := BaseManager.get_extraction_loot_count()
+	loot_label.text = "待处理战利品: %d" % loot_count
+	loot_label.modulate = Color(1.0, 0.78, 0.35) if loot_count > 0 else Color(0.65, 0.72, 0.78)
+	status_label.text = "3D 基地与荒野已接入；沿破败公路寻找四个副本入口。"
+
+
+func _refresh_facilities() -> void:
+	if BaseManager == null or not is_inside_tree():
+		return
+	for facility in get_tree().get_nodes_in_group("base_facility"):
+		if facility is BaseFacility3D and is_ancestor_of(facility):
+			facility.apply_snapshot(BaseManager.get_facility_snapshot(facility.facility_id))
+
+
+func get_facility_count() -> int:
+	var count := 0
+	for facility in get_tree().get_nodes_in_group("base_facility"):
+		if facility is BaseFacility3D and is_ancestor_of(facility):
+			count += 1
+	return count
+
+
+func get_dungeon_entrance_count() -> int:
+	var count := 0
+	for entrance in get_tree().get_nodes_in_group("dungeon_entrance"):
+		if entrance is DungeonEntrance3D and is_ancestor_of(entrance):
+			count += 1
+	return count
+
+
+func get_environment_snapshot() -> Dictionary:
+	return environment_kit.get_environment_snapshot() if environment_kit != null else {}
+
+
+func get_active_menu() -> CanvasLayer:
+	return _active_menu
+
+
+func get_facility_snapshots() -> Array[Dictionary]:
+	return BaseManager.get_facility_snapshots() if BaseManager != null else []

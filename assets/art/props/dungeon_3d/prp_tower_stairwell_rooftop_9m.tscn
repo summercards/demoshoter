@@ -1,0 +1,8 @@
+[gd_scene load_steps=1 format=3]
+; [PORT-STRIP 2026-10-21] visual child pointed into moved environments dir; removed to keep scene loadable
+
+; 楼顶 9m 楼梯间 - 复用已导入的 GLB 资产
+
+
+[node name="PrpTowerStairwellRooftop9m" type="Node3D"]
+

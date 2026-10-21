@@ -1,0 +1,167 @@
+extends Node
+
+const FacilityCatalog = preload("res://src/base/BaseFacilityCatalog.gd")
+const FacilityService = preload("res://src/base/BaseFacilityService.gd")
+
+
+func _ready() -> void:
+	process_mode = Node.PROCESS_MODE_ALWAYS
+	var failures: Array[String] = []
+	_verify_catalog(failures)
+	_verify_query_and_atomic_command(failures)
+	await _verify_world_and_terminal(failures)
+	_finish(failures)
+
+
+func _verify_catalog(failures: Array[String]) -> void:
+	var definitions := FacilityCatalog.all_definitions()
+	# 10 = 原 9 条 + 2026-10-19 新增的 weapon_forge（武器改造台）。
+	# 断言的是**这条数目被有意改过**，不是"某个具体数字才对"：
+	# 增减设施必须回来改这里，避免有人顺手加了条目而目录界面悄悄变形。
+	if definitions.size() != 10:
+		failures.append("正式基地设施目录不是 10 项（实际 %d）" % definitions.size())
+	var ids: Dictionary = {}
+	var all_text := ""
+	for definition in definitions:
+		var facility_id := str(definition.get("facility_id", ""))
+		if facility_id.is_empty() or ids.has(facility_id):
+			failures.append("设施 ID 为空或重复：%s" % facility_id)
+		ids[facility_id] = true
+		all_text += str(definition.get("display_name", ""))
+		var action_kind := str(definition.get("action_kind", ""))
+		if action_kind not in [FacilityCatalog.ACTION_INFO, FacilityCatalog.ACTION_MENU, FacilityCatalog.ACTION_SCENE]:
+			failures.append("设施动作类型无效：%s" % facility_id)
+		var action_path := str(definition.get("action_path", ""))
+		if action_kind != FacilityCatalog.ACTION_INFO and not ResourceLoader.exists(action_path, "PackedScene"):
+			failures.append("设施动作场景不存在：%s" % facility_id)
+	for retired_name in ["资源转换", "废品回收", "黑市"]:
+		if retired_name in all_text:
+			failures.append("正式设施目录仍包含旧建筑：%s" % retired_name)
+	for removed_id in ["fate_divination", "base_console"]:
+		if ids.has(removed_id):
+			failures.append("正式设施目录仍包含已移除设施：%s" % removed_id)
+
+
+func _verify_query_and_atomic_command(failures: Array[String]) -> void:
+	var data := BaseData.new()
+	data.extraction_points = 500
+	data.workshop_level = 2
+	data.blueprint_gunbody_tier = 1
+	data.blueprint_bullet_tier = 2
+	data.blueprint_attachment_tier = 3
+	var snapshots := FacilityService.get_all_snapshots(data)
+	if snapshots.size() != 10:
+		failures.append("统一设施查询没有返回 10 个快照（实际 %d）" % snapshots.size())
+	for snapshot in snapshots:
+		if str(snapshot.get("summary", "")).is_empty():
+			failures.append("设施缺少玩家可读摘要：%s" % str(snapshot.get("facility_id", "")))
+		if not bool(snapshot.get("available", false)):
+			failures.append("基础设施在新档中不可用：%s" % str(snapshot.get("facility_id", "")))
+
+	var result := FacilityService.apply_upgrade("weapon_workshop", data, 150)
+	if not bool(result.get("success", false)) or data.workshop_level != 3 or data.extraction_points != 350:
+		failures.append("设施升级没有同时修改资源与等级")
+	FacilityService.rollback_upgrade(result, data)
+	if data.workshop_level != 2 or data.extraction_points != 500:
+		failures.append("设施升级回滚没有同时恢复资源与等级")
+	var rejected := FacilityService.apply_upgrade("fate_collection", data, 100)
+	if bool(rejected.get("success", false)) or data.extraction_points != 500:
+		failures.append("不可升级设施错误地扣除了资源")
+
+
+func _verify_world_and_terminal(failures: Array[String]) -> void:
+	var base_scene := load("res://scenes/BaseWorld3D.tscn") as PackedScene
+	var base_world := base_scene.instantiate() as BaseWorld3D
+	add_child(base_world)
+	await get_tree().process_frame
+	var world_ids: Dictionary = {}
+	for facility in get_tree().get_nodes_in_group("base_facility"):
+		if not facility is BaseFacility3D or not base_world.is_ancestor_of(facility):
+			continue
+		if facility.facility_id.is_empty() or world_ids.has(facility.facility_id):
+			failures.append("3D 基地设施 ID 为空或重复：%s" % facility.facility_id)
+		world_ids[facility.facility_id] = true
+		var snapshot: Dictionary = facility.get_snapshot()
+		if str(snapshot.get("summary", "")).is_empty() or "\n" not in facility.name_label.text:
+			failures.append("3D 设施牌没有显示实时摘要：%s" % facility.facility_id)
+		# 2026-09-29 业主口径：头顶常驻名字牌退役（节点与快照文字保留），
+		# 黄色交互提示放大后接管设施头顶位置。把这两条钉住，改回去必红。
+		# 字号下界 2026-10-12 随业主「放大一倍」抬到 68、同日「有点太大了」定为 50。
+		if facility.name_label.visible:
+			failures.append("设施头顶常驻名字牌未退役：%s" % facility.facility_id)
+		if facility.prompt_label.font_size < 50:
+			failures.append(
+				"黄色交互提示字号未按 2026-10-12 口径放大：%s（%d < 50）"
+				% [facility.facility_id, facility.prompt_label.font_size]
+			)
+	if (
+		world_ids.size() != 7
+		or not world_ids.has("vault")
+		or not world_ids.has("base_vending")
+		or not world_ids.has("base_recovery")
+		or not world_ids.has("avatar_wardrobe")
+	):
+		failures.append("3D 基地没有绑定现行 7 个实体设施 ID: %s" % str(world_ids.keys()))
+	# 2026-10-19：本场景是**历史兼容基地**（`GameDesignConfig.BASE_SCENE_3D`），
+	# 不是玩家实际进的 99F（那是 `TowerDescent3D`）。所以：
+	#   - 怪物档案室在这里早已下线（`verify_base_optional_facilities_removed` 钉住），
+	#     设施数为 7 —— 原先这里写的 8 是那次下线时漏改的，属既有红项；
+	#   - 武器改造台只装在正式 99F，本场景不装（不把新功能摊进兼容场景）。
+	if world_ids.has("fate_divination") or world_ids.has("base_console") or world_ids.has("monster_archive"):
+		failures.append("3D 基地仍实例化命运占卜屋、基地管理终端或已下线的怪物档案室")
+
+	var menu_scene := load("res://scenes/BaseMenu.tscn") as PackedScene
+	var menu := menu_scene.instantiate() as BaseMenu
+	menu.overlay_mode = true
+	add_child(menu)
+	await get_tree().process_frame
+	var grid := menu.get_node_or_null("VBox/HSplit/RightPanel/BuildingsGrid") as GridContainer
+	# 目录条数 = `BaseFacilityCatalog.DEFINITIONS.size()`（现为 10：原 9 条 + 武器改造台）。
+	# 写成常量而不是魔数，改目录时不必再回来改这里。
+	var expected_directory_size: int = BaseFacilityCatalog.DEFINITIONS.size()
+	if grid == null or grid.get_child_count() != expected_directory_size:
+		failures.append(
+			"基地管理界面没有显示完整 %d 设施目录（实际 %d）" % [
+				expected_directory_size,
+				grid.get_child_count() if grid != null else -1,
+			]
+		)
+	else:
+		var terminal_text := ""
+		for child in grid.get_children():
+			if child is Button:
+				terminal_text += child.text
+		for retired_name in ["资源转换", "废品回收", "黑市"]:
+			if retired_name in terminal_text:
+				failures.append("基地管理终端仍显示旧建筑：%s" % retired_name)
+	menu.call("_show_building_panel", "weapon_workshop")
+	await get_tree().process_frame
+	var building_panel := menu.find_child("BuildingUpgradePanel", true, false) as PanelContainer
+	if building_panel == null:
+		failures.append("基地管理终端无法打开设施详情与升级面板")
+	else:
+		var panel_text := _collect_label_text(building_panel)
+		if "枪械工坊" not in panel_text or "当前状态" not in panel_text:
+			failures.append("设施详情面板没有读取共享设施快照")
+	menu.queue_free()
+	base_world.queue_free()
+	await get_tree().process_frame
+
+
+func _collect_label_text(root: Node) -> String:
+	var result := ""
+	if root is Label:
+		result += (root as Label).text
+	for child in root.get_children():
+		result += _collect_label_text(child)
+	return result
+
+
+func _finish(failures: Array[String]) -> void:
+	if failures.is_empty():
+		print("BASE_FACILITY_FRAMEWORK_OK: ten stable facilities (7 on the legacy base scene + catalog entries), shared snapshots, visible status, directory, and atomic upgrade planning pass")
+		get_tree().quit(0)
+		return
+	for failure in failures:
+		push_error(failure)
+	get_tree().quit(1)

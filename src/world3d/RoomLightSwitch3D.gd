@@ -1,0 +1,348 @@
+class_name RoomLightSwitch3D
+extends Area3D
+## 房间墙面灯开关。只控制真实房间灯，不参与 PlayerVision3D 的玩法显隐。
+
+signal light_toggled(is_on: bool)
+
+const INTERACTION_RANGE := 2.2
+const STAGED_MAIN_LIGHT_START_SECONDS := 4.5
+
+var _controlled_lights: Array[WastelandLight3D] = []
+## 同一空间的并联开关（99F基地东西墙各一个）。它们共享同一组受控灯：
+## 启动序列互相锁定（避免同一盏灯上叠两段启动动画），
+## 指示灯与提示文字互相跟随（否则并联的另一端会停留在过期状态）。
+var _linked_switches: Array[RoomLightSwitch3D] = []
+var _turn_on_presentation: Node
+var _turn_on_presentation_duration := 0.0
+var _base_power_available := true
+var _resume_after_power := true
+var _sequence_generation := 0
+var _transitioning := false
+var _player_in_range := false
+var _prompt: Label3D
+var _indicator_material: StandardMaterial3D
+
+
+## 双向注册一个并联开关。self 与 other 都会视对方为同伴。
+func link_switch(other: RoomLightSwitch3D) -> void:
+	if other == null or other == self or _linked_switches.has(other):
+		return
+	_linked_switches.append(other)
+	other._register_linked_switch(self)
+
+
+func _register_linked_switch(peer: RoomLightSwitch3D) -> void:
+	if peer == null or peer == self or _linked_switches.has(peer):
+		return
+	_linked_switches.append(peer)
+
+
+func configure(controlled_light: WastelandLight3D, starts_on := false) -> void:
+	var lights: Array[WastelandLight3D] = []
+	if controlled_light != null:
+		lights.append(controlled_light)
+	configure_group(lights, starts_on)
+
+
+func configure_group(
+	controlled_lights: Array[WastelandLight3D],
+	starts_on := false
+) -> void:
+	_resume_after_power = starts_on
+	_controlled_lights.clear()
+	for light in controlled_lights:
+		if light != null and is_instance_valid(light):
+			_controlled_lights.append(light)
+			light.set_light_enabled(starts_on and _base_power_available)
+	_update_state_visual()
+
+
+func bind_base_power() -> void:
+	if not BaseManager.base_power_changed.is_connected(_on_base_power_changed):
+		BaseManager.base_power_changed.connect(_on_base_power_changed)
+	_on_base_power_changed(BaseManager.is_base_power_on())
+
+
+func _on_base_power_changed(enabled: bool) -> void:
+	if enabled == _base_power_available:
+		return
+	_base_power_available = enabled
+	set_light_on(enabled and _resume_after_power)
+	# 主灯尚未亮起时也必须取消美术启动协程，不能依赖 changed 事件。
+	if is_instance_valid(_turn_on_presentation):
+		_turn_on_presentation.call("set_presentation_lighting_enabled", is_light_on())
+
+
+func configure_turn_on_presentation(controller: Node, duration_seconds := 4.2) -> void:
+	_turn_on_presentation = controller
+	_turn_on_presentation_duration = maxf(duration_seconds, 0.0)
+
+
+func _ready() -> void:
+	add_to_group("room_light_switch_3d")
+	add_to_group(PlayerInteractionController3D.PROVIDER_GROUP)
+	collision_layer = 0
+	collision_mask = 1
+	monitoring = true
+	monitorable = true
+	_build_visual()
+	body_entered.connect(_on_body_entered)
+	body_exited.connect(_on_body_exited)
+	_update_state_visual()
+
+
+func get_interaction_candidate(_player: Player3D) -> Dictionary:
+	if not _player_in_range or _controlled_lights.is_empty():
+		return {}
+	return {
+		"available": true,
+		"interaction_id": "room_light:%d" % get_instance_id(),
+		"position": global_position,
+		"priority": 50,
+		"prompt": _prompt.text if _prompt != null else "[E] 切换中央灯",
+	}
+
+
+func set_interaction_focus(_candidate: Dictionary, focused: bool) -> void:
+	set_prompt_visible(focused and _player_in_range)
+
+
+func perform_interaction(_player: Player3D, _candidate: Dictionary) -> bool:
+	return _player_in_range and toggle_light()
+
+
+func toggle_light() -> bool:
+	_prune_invalid_lights()
+	if not _base_power_available or _controlled_lights.is_empty() or _is_busy():
+		return false
+	var next_state := not is_light_on()
+	_remember_light_intent(next_state)
+	if AudioManager != null:
+		AudioManager.emit_event("world.light.switch_on" if next_state else "world.light.switch_off", {"source_node": self, "source_position": global_position, "volume_db": 2.0, "max_distance": 14.0, "unit_size": 2.0})
+	if next_state and _has_turn_on_presentation():
+		_run_turn_on_sequence()
+		return true
+	for light in _controlled_lights:
+		light.set_light_enabled(next_state)
+	_update_state_visual()
+	_refresh_linked_visuals()
+	light_toggled.emit(next_state)
+	return true
+
+
+func _remember_light_intent(enabled: bool) -> void:
+	_resume_after_power = enabled
+	for peer in _linked_switches:
+		if is_instance_valid(peer):
+			peer._resume_after_power = enabled
+
+
+func set_light_on(enabled: bool) -> bool:
+	if _base_power_available:
+		_remember_light_intent(enabled)
+	enabled = enabled and _base_power_available
+	_prune_invalid_lights()
+	if _controlled_lights.is_empty():
+		return false
+	_sequence_generation += 1
+	_transitioning = false
+	var changed := is_light_on() != enabled
+	for light in _controlled_lights:
+		light.set_light_enabled(enabled)
+	_update_state_visual()
+	_refresh_linked_visuals()
+	if changed:
+		light_toggled.emit(enabled)
+	return true
+
+
+func is_light_on() -> bool:
+	_prune_invalid_lights()
+	if _controlled_lights.is_empty():
+		return false
+	for light in _controlled_lights:
+		if not light.is_light_enabled():
+			return false
+	return true
+
+
+## 文字提示牌退役为纯文案载体（text 仍随灯状态更新）；可见反馈由常驻圆点承担。
+func set_prompt_visible(_visible_state: bool) -> void:
+	pass
+
+
+func get_interaction_dot_anchor() -> Vector3:
+	if _prompt != null and is_instance_valid(_prompt):
+		return _prompt.global_position
+	return global_position + Vector3.UP * 1.75
+
+
+## 没有任何受控灯时开关不可交互，圆点淡出。
+func is_interaction_dot_visible() -> bool:
+	return not _controlled_lights.is_empty()
+
+
+
+func get_snapshot() -> Dictionary:
+	return {
+		"light_on": is_light_on(),
+		"transitioning": _transitioning,
+		"player_in_range": _player_in_range,
+		"has_prompt": _prompt != null,
+		"controlled_light_count": _controlled_lights.size(),
+		"linked_switch_count": _linked_switches.size(),
+		"is_3d": true,
+	}
+
+
+## 自身或任一并联开关正在跑启动序列时都算忙：两段序列不能压在同一个灯上。
+func _is_busy() -> bool:
+	if _transitioning:
+		return true
+	for linked in _linked_switches:
+		if linked != null and is_instance_valid(linked) and linked._transitioning:
+			return true
+	return false
+
+
+## 并联开关的视觉是各自缓存的，本端状态变化后要让对端重算指示灯与提示文字。
+func _refresh_linked_visuals() -> void:
+	for linked in _linked_switches:
+		if linked != null and is_instance_valid(linked):
+			linked._update_state_visual()
+
+
+func _prune_invalid_lights() -> void:
+	for index in range(_controlled_lights.size() - 1, -1, -1):
+		if not is_instance_valid(_controlled_lights[index]):
+			_controlled_lights.remove_at(index)
+	for index in range(_linked_switches.size() - 1, -1, -1):
+		if not is_instance_valid(_linked_switches[index]):
+			_linked_switches.remove_at(index)
+
+
+func _has_turn_on_presentation() -> bool:
+	return (
+		_turn_on_presentation != null
+		and is_instance_valid(_turn_on_presentation)
+		and _turn_on_presentation_duration > 0.0
+		and _turn_on_presentation.has_method("play_turn_on_sequence")
+	)
+
+
+func _run_turn_on_sequence() -> void:
+	_sequence_generation += 1
+	var generation := _sequence_generation
+	_transitioning = true
+	_update_state_visual()
+	_refresh_linked_visuals()
+	var presentation_sequence: Variant = _turn_on_presentation.call(
+		"play_turn_on_sequence", _turn_on_presentation_duration
+	)
+	await get_tree().create_timer(STAGED_MAIN_LIGHT_START_SECONDS).timeout
+	if not is_instance_valid(self) or not _base_power_available or not _transitioning or generation != _sequence_generation:
+		return
+	for light in _controlled_lights:
+		if light != null and is_instance_valid(light):
+			light.set_light_enabled(true)
+	await presentation_sequence
+	if not is_instance_valid(self) or not _base_power_available or not _transitioning or generation != _sequence_generation:
+		return
+	_transitioning = false
+	_update_state_visual()
+	_refresh_linked_visuals()
+	light_toggled.emit(true)
+
+
+func _build_visual() -> void:
+	if get_node_or_null("SwitchPlate") != null:
+		return
+	var metal := _material(Color(0.10, 0.12, 0.13), 0.72, 0.34)
+	var plate_mesh := BoxMesh.new()
+	plate_mesh.size = Vector3(0.54, 0.72, 0.14)
+	plate_mesh.material = metal
+	var plate := MeshInstance3D.new()
+	plate.name = "SwitchPlate"
+	plate.position.y = 1.0
+	plate.mesh = plate_mesh
+	add_child(plate)
+
+	_indicator_material = _material(Color(0.70, 0.14, 0.10), 0.12, 0.30, true)
+	var indicator_mesh := SphereMesh.new()
+	indicator_mesh.radius = 0.075
+	indicator_mesh.height = 0.15
+	indicator_mesh.radial_segments = 10
+	indicator_mesh.rings = 5
+	indicator_mesh.material = _indicator_material
+	var indicator := MeshInstance3D.new()
+	indicator.name = "Indicator"
+	indicator.position = Vector3(0, 1.17, -0.11)
+	indicator.mesh = indicator_mesh
+	add_child(indicator)
+
+	var lever_mesh := BoxMesh.new()
+	lever_mesh.size = Vector3(0.10, 0.28, 0.10)
+	lever_mesh.material = _material(Color(0.66, 0.68, 0.65), 0.84, 0.24)
+	var lever := MeshInstance3D.new()
+	lever.name = "Lever"
+	lever.position = Vector3(0, 0.91, -0.12)
+	lever.mesh = lever_mesh
+	add_child(lever)
+
+	var shape := SphereShape3D.new()
+	shape.radius = INTERACTION_RANGE
+	var collision := CollisionShape3D.new()
+	collision.position.y = 0.9
+	collision.shape = shape
+	add_child(collision)
+
+	_prompt = Label3D.new()
+	_prompt.name = "InteractLabel"
+	_prompt.position = Vector3(0, 1.75, 0)
+	_prompt.font_size = 34
+	_prompt.pixel_size = 0.010
+	_prompt.outline_size = 8
+	_prompt.modulate = Color(0.88, 0.94, 0.90)
+	_prompt.no_depth_test = true
+	_prompt.visible = false
+	add_child(_prompt)
+
+
+func _update_state_visual() -> void:
+	var enabled := is_light_on()
+	# 用 _is_busy() 而非 _transitioning：并联开关启动期间，对端也要显示
+	# 「灯光启动中…」，否则玩家会在另一个开关上看到已经过期的「开启中央灯」。
+	var busy := _is_busy()
+	if _prompt != null:
+		_prompt.text = (
+			"灯光启动中…"
+			if busy
+			else "[E] 关闭中央灯" if enabled else "[E] 开启中央灯"
+		)
+	if _indicator_material != null:
+		var color := Color(0.26, 0.92, 0.50) if enabled else Color(0.78, 0.16, 0.10)
+		_indicator_material.albedo_color = color
+		_indicator_material.emission = color
+
+
+func _on_body_entered(body: Node3D) -> void:
+	if body.is_in_group("player_3d"):
+		_player_in_range = true
+
+
+func _on_body_exited(body: Node3D) -> void:
+	if body.is_in_group("player_3d"):
+		_player_in_range = false
+		set_prompt_visible(false)
+
+
+func _material(color: Color, metallic: float, roughness: float, emission := false) -> StandardMaterial3D:
+	var material := StandardMaterial3D.new()
+	material.albedo_color = color
+	material.metallic = metallic
+	material.roughness = roughness
+	if emission:
+		material.emission_enabled = true
+		material.emission = color
+		material.emission_energy_multiplier = 1.8
+	return material

@@ -1,0 +1,8 @@
+[gd_resource type="BoxMesh" format=3 uid="uid://n2dqsqlmluco"]
+
+[sub_resource type="StandardMaterial3D" id="existing_city_material_snapshot"]
+shading_mode = 0
+albedo_color = Color(0.025, 0.04, 0.052, 1)
+
+[resource]
+material = SubResource("existing_city_material_snapshot")

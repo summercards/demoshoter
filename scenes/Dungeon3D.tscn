@@ -1,0 +1,187 @@
+[gd_scene load_steps=11 format=3]
+
+[ext_resource type="Script" path="res://src/world3d/Dungeon3D.gd" id="1_dungeon"]
+[ext_resource type="PackedScene" path="res://scenes/Player3D.tscn" id="2_player"]
+[ext_resource type="Script" path="res://src/combat3d/ProjectilePool3D.gd" id="3_pool"]
+[ext_resource type="Script" path="res://src/combat3d/CombatEffectPool3D.gd" id="4_fx_pool"]
+[ext_resource type="Script" path="res://src/ui/DungeonMinimap3D.gd" id="5_minimap"]
+[ext_resource type="PackedScene" path="res://assets/art/ui/pause_3d/ui_pause_overlay_screen.tscn" id="6_pause"]
+
+[sub_resource type="Shader" id="ShaderLowHealth"]
+code = "shader_type canvas_item;\nrender_mode unshaded;\nuniform float intensity : hint_range(0.0, 1.0) = 0.0;\nvoid fragment() {\n    float d = distance(UV, vec2(0.5));\n    float edge = smoothstep(0.30, 0.69, d);\n    COLOR = vec4(0.72, 0.025, 0.018, edge * intensity * 0.62);\n}\n"
+
+[sub_resource type="ShaderMaterial" id="MaterialLowHealth"]
+shader = SubResource("ShaderLowHealth")
+shader_parameter/intensity = 0.0
+
+[sub_resource type="StyleBoxFlat" id="StyleHPBackground"]
+bg_color = Color(0.086, 0.106, 0.137, 0.72)
+corner_radius_top_left = 2
+corner_radius_top_right = 2
+corner_radius_bottom_right = 2
+corner_radius_bottom_left = 2
+
+[sub_resource type="StyleBoxFlat" id="StyleHPFill"]
+bg_color = Color(0.925, 0.196, 0.227, 1)
+corner_radius_top_left = 2
+corner_radius_top_right = 2
+corner_radius_bottom_right = 2
+corner_radius_bottom_left = 2
+
+[node name="Dungeon3D" type="Node3D"]
+script = ExtResource("1_dungeon")
+
+[node name="WorldEnvironment" type="WorldEnvironment" parent="."]
+
+[node name="DirectionalLight3D" type="DirectionalLight3D" parent="."]
+rotation_degrees = Vector3(-60, -32, 0)
+shadow_enabled = true
+directional_shadow_max_distance = 75.0
+
+[node name="GeneratedCorridors" type="Node3D" parent="."]
+
+[node name="GeneratedRooms" type="Node3D" parent="."]
+
+[node name="ActiveEnemies" type="Node3D" parent="."]
+
+[node name="ProjectilePool3D" type="Node3D" parent="."]
+script = ExtResource("3_pool")
+
+[node name="CombatEffectPool3D" type="Node3D" parent="."]
+script = ExtResource("4_fx_pool")
+
+[node name="Player3D" parent="." instance=ExtResource("2_player")]
+combat_enabled = true
+
+[node name="HUD" type="CanvasLayer" parent="."]
+
+[node name="DungeonMinimap3D" type="Control" parent="HUD"]
+anchors_preset = 1
+anchor_left = 1.0
+anchor_right = 1.0
+offset_left = -328.0
+offset_top = 82.0
+offset_right = -18.0
+offset_bottom = 352.0
+grow_horizontal = 0
+script = ExtResource("5_minimap")
+
+[node name="ControlHint" type="Label" parent="HUD"]
+anchors_preset = 2
+anchor_top = 1.0
+anchor_bottom = 1.0
+offset_left = 18.0
+offset_top = -62.0
+offset_right = 930.0
+offset_bottom = -38.0
+grow_vertical = 0
+text = "WASD 移动 · 鼠标瞄准 / 左键射击 · R 换弹 · F 探照灯 · Shift 冲刺 · E 交互 · I / Tab 背包 · Esc 暂停"
+theme_override_colors/font_color = Color(0.72, 0.82, 0.88, 1)
+theme_override_font_sizes/font_size = 14
+
+[node name="VisionHint" type="Label" parent="HUD"]
+anchors_preset = 2
+anchor_top = 1.0
+anchor_bottom = 1.0
+offset_left = 18.0
+offset_top = -36.0
+offset_right = 760.0
+offset_bottom = -14.0
+grow_vertical = 0
+text = "逻辑视野 360° / 21m · F 手动开关探照灯 · 当前扇形仅表示目光方向 · 实体遮挡仍会隐藏目标"
+theme_override_colors/font_color = Color(0.36, 0.78, 0.9, 0.92)
+theme_override_font_sizes/font_size = 13
+
+[node name="LowHealthVignette" type="ColorRect" parent="HUD"]
+material = SubResource("MaterialLowHealth")
+z_index = 220
+anchors_preset = 15
+anchor_right = 1.0
+anchor_bottom = 1.0
+grow_horizontal = 2
+grow_vertical = 2
+mouse_filter = 2
+
+[node name="TopBar" type="PanelContainer" parent="HUD"]
+offset_left = 18.0
+offset_top = 18.0
+offset_right = 1130.0
+offset_bottom = 68.0
+
+[node name="Margin" type="MarginContainer" parent="HUD/TopBar"]
+theme_override_constants/margin_left = 14
+theme_override_constants/margin_top = 8
+theme_override_constants/margin_right = 14
+theme_override_constants/margin_bottom = 8
+
+[node name="HBox" type="HBoxContainer" parent="HUD/TopBar/Margin"]
+theme_override_constants/separation = 14
+
+[node name="TitleLabel" type="Label" parent="HUD/TopBar/Margin/HBox"]
+text = "3D行动区"
+
+[node name="SeedLabel" type="Label" parent="HUD/TopBar/Margin/HBox"]
+text = "SEED"
+
+[node name="HPLabel" type="Label" parent="HUD/TopBar/Margin/HBox"]
+text = "HP"
+theme_override_colors/font_color = Color(1, 0.52, 0.52, 1)
+
+[node name="HPBar" type="ProgressBar" parent="HUD/TopBar/Margin/HBox"]
+custom_minimum_size = Vector2(150, 18)
+layout_mode = 2
+max_value = 100.0
+value = 100.0
+show_percentage = false
+theme_override_styles/background = SubResource("StyleHPBackground")
+theme_override_styles/fill = SubResource("StyleHPFill")
+
+[node name="AmmoLabel" type="Label" parent="HUD/TopBar/Margin/HBox"]
+text = "AMMO"
+
+[node name="RoomLabel" type="Label" parent="HUD/TopBar/Margin/HBox"]
+text = "ROOM"
+
+[node name="LootLabel" type="Label" parent="HUD/TopBar/Margin/HBox"]
+text = "LOOT 0件 / 0价值"
+
+[node name="StatusPanel" type="PanelContainer" parent="HUD"]
+offset_left = 18.0
+offset_top = 78.0
+offset_right = 600.0
+offset_bottom = 126.0
+
+[node name="Margin" type="MarginContainer" parent="HUD/StatusPanel"]
+theme_override_constants/margin_left = 12
+theme_override_constants/margin_top = 8
+theme_override_constants/margin_right = 12
+theme_override_constants/margin_bottom = 8
+
+[node name="StatusLabel" type="Label" parent="HUD/StatusPanel/Margin"]
+text = "正在建立行动区……"
+
+[node name="ExtractionPanel" type="PanelContainer" parent="HUD"]
+visible = false
+offset_left = 390.0
+offset_top = 650.0
+offset_right = 890.0
+offset_bottom = 720.0
+
+[node name="Margin" type="MarginContainer" parent="HUD/ExtractionPanel"]
+theme_override_constants/margin_left = 14
+theme_override_constants/margin_top = 8
+theme_override_constants/margin_right = 14
+theme_override_constants/margin_bottom = 8
+
+[node name="VBox" type="VBoxContainer" parent="HUD/ExtractionPanel/Margin"]
+
+[node name="Label" type="Label" parent="HUD/ExtractionPanel/Margin/VBox"]
+text = "撤离同步"
+horizontal_alignment = 1
+
+[node name="ExtractionBar" type="ProgressBar" parent="HUD/ExtractionPanel/Margin/VBox"]
+custom_minimum_size = Vector2(460, 22)
+value = 0.0
+show_percentage = false
+
+[node name="PauseOverlay" parent="HUD" instance=ExtResource("6_pause")]

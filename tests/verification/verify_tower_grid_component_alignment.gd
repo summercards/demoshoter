@@ -1,0 +1,633 @@
+extends Node
+## 塔楼关卡组件坐标验收：房间边界、门墙、交互门、走廊和楼板洞共用 5m 网格。
+
+
+func _ready() -> void:
+	var failures: Array[String] = []
+	var scene := load("res://scenes/TowerDescent3D.tscn") as PackedScene
+	var tower := scene.instantiate() as TowerDescent3D
+	tower.test_mode = true
+	tower.run_seed_override = 990095
+	# 本测试只验收「生成器」的 5m 结构契约（网格边界 / 走廊计数 / 门墙归属 / 楼板洞）。
+	# 98F 已被区块00 授权布局整层接管，房间、门墙与走廊不再由生成器产出，
+	# 其装配由 verify_block00_floor98_assembly 单独验收。这里强制回落生成器房表，
+	# 才能继续校验其余楼层的结构契约，避免把「有意接管」误判成回归。
+	tower.force_standard_floor_plan_for_test = true
+	add_child(tower)
+	await get_tree().process_frame
+	await get_tree().physics_frame
+	if not tower.generate_through_floor_for_test(TowerDescent3D.DEEPEST_PLANNED_FLOOR):
+		failures.append("当前发布楼层结构验收准备失败")
+
+	var generation := tower.get_generation_snapshot()
+	var room_by_id := tower.get("_room_by_id") as Dictionary
+	for record_value in generation.get("records", []):
+		var record := record_value as Dictionary
+		var id := str(record.get("id", ""))
+		var position := record.get("position", Vector3.ZERO) as Vector3
+		var dimensions := record.get("custom_dimensions", Vector2.ZERO) as Vector2
+		if bool(record.get("grid_position_adjusted", false)):
+			failures.append("%s authored position required runtime grid correction" % id)
+		if not TowerGeometry3D.is_component_axis_aligned(position.x, dimensions.x):
+			failures.append("%s X boundary is not on the 5m grid" % id)
+		if not TowerGeometry3D.is_component_axis_aligned(position.z, dimensions.y):
+			failures.append("%s Z boundary is not on the 5m grid" % id)
+		var room := room_by_id.get(id) as DungeonRoom3D
+		if room == null:
+			failures.append("%s room instance is missing" % id)
+			continue
+		room.set_stream_state(1)
+		for side in room.doors:
+			_validate_room_door(room, side, failures)
+
+	var horizontal_count := 0
+	var nonzero_x_count := 0
+	var nonzero_z_count := 0
+	var corridor_failure_start := failures.size()
+	var vertical_count := 0
+	var entry_hub_dynamic_corridor_verified := false
+	for connector_value in (tower.get("_corridor_by_edge") as Dictionary).values():
+		var connector := connector_value as Node3D
+		if connector == null:
+			continue
+		if bool(connector.get_meta("is_vertical_connector", false)):
+			vertical_count += 1
+			_validate_stair_approach_wall_modules(connector, failures)
+			_validate_stair_approach_wall_facings(connector, failures)
+			_validate_stairwell_5m_contract(connector, failures)
+			continue
+		horizontal_count += 1
+		var tangent_error := float(connector.get_meta("door_tangent_error_m", INF))
+		var start := connector.get_meta("start_door_position", Vector3.INF) as Vector3
+		var end := connector.get_meta("end_door_position", Vector3.INF) as Vector3
+		if tangent_error > 0.01:
+			failures.append("%s horizontal door lanes differ by %.3fm" % [connector.name, tangent_error])
+		var length := start.distance_to(end)
+		var along_x := absf(end.x - start.x) >= absf(end.z - start.z)
+		var tangent_axis := Vector3.BACK if along_x else Vector3.RIGHT
+		var expected_tangent_error := absf((end - start).dot(tangent_axis))
+		if not is_finite(tangent_error) or not is_equal_approx(tangent_error, expected_tangent_error):
+			failures.append("%s 门槽误差元数据不等于垂轴投影" % connector.name)
+		if length > 0.05:
+			if along_x:
+				nonzero_x_count += 1
+			else:
+				nonzero_z_count += 1
+			if is_equal_approx(tangent_error, length):
+				failures.append("%s 非零走廊长度被错误用作门槽误差" % connector.name)
+			print("CORRIDOR_TANGENT_SAMPLE edge=%s axis=%s length=%.3f tangent=%.3f coverage=%.3f" % [
+				str(connector.get_meta("edge_key", "")), "X" if along_x else "Z",
+				length, tangent_error, float(connector.get_meta("module_coverage_length_m", -1.0)),
+			])
+		if not is_equal_approx(length, snappedf(length, TowerGeometry3D.GRID_UNIT_M)):
+			failures.append("%s corridor length %.3fm is not a 5m component multiple" % [connector.name, length])
+		_validate_horizontal_corridor_modules(connector, start, end, failures)
+		var endpoint_ids := [
+			str(connector.get_meta("from_room_id", "")),
+			str(connector.get_meta("to_room_id", "")),
+		]
+		if "floor_01_entry" in endpoint_ids and "floor_01_hub" in endpoint_ids:
+			entry_hub_dynamic_corridor_verified = (
+				is_equal_approx(length, 25.0)
+				and int(connector.get_meta("floor_module_count", -1)) == 5
+				and int(connector.get_meta("wall_module_count", -1)) == 10
+			)
+	if horizontal_count != 15:
+		failures.append("expected 15 generated horizontal component corridors for the published 98F slice, got %d" % horizontal_count)
+	if not entry_hub_dynamic_corridor_verified:
+		failures.append("98F safe-room north corridor is not a complete 25m/5-module passage")
+	if vertical_count <= 0:
+		failures.append("tower generated no vertical connector for stair approach wall validation")
+	if nonzero_x_count <= 0 or nonzero_z_count <= 0:
+		failures.append("非零长度走廊必须实际覆盖 X/Z 两轴，禁止零长度样本制造假绿")
+	print("CORRIDOR_TANGENT_REGRESSION_DONE horizontal=%d nonzero_x=%d nonzero_z=%d failures=%d" % [
+		horizontal_count, nonzero_x_count, nonzero_z_count, failures.size() - corridor_failure_start,
+	])
+
+	_validate_key_door(room_by_id, "facility", "west", Vector3(-15.0, -12.0, 2.5), failures)
+	_validate_key_door(room_by_id, "facility", "east", Vector3(15.0, -12.0, 2.5), failures)
+	_validate_key_door(room_by_id, "floor_01_entry", "east", Vector3(35.0, -24.0, 2.5), failures)
+	var entry98 := room_by_id.get("floor_01_entry") as DungeonRoom3D
+	var hub98 := room_by_id.get("floor_01_hub") as DungeonRoom3D
+	var hub_is_north := hub98.position.z < entry98.position.z
+	var entry_hub_side := "north" if hub_is_north else "south"
+	var hub_entry_side := "south" if hub_is_north else "north"
+	var z_sign := -1.0 if hub_is_north else 1.0
+	_validate_key_door(
+		room_by_id,
+		"floor_01_entry",
+		entry_hub_side,
+		Vector3(entry98.position.x, -24.0, entry98.position.z + z_sign * 7.5),
+		failures
+	)
+	_validate_key_door(
+		room_by_id,
+		"floor_01_hub",
+		hub_entry_side,
+		Vector3(
+			entry98.position.x,
+			-24.0,
+			hub98.position.z - z_sign * hub98.get_dimensions().y * 0.5
+		),
+		failures
+	)
+
+	var floor_stages := tower.get_tower_snapshot().get("floor_stages", []) as Array
+	var expected_holes := [1, 1, 0]
+	for stage_value in floor_stages:
+		var stage := stage_value as Dictionary
+		var index := int(stage.get("floor_index", -1))
+		if index < 0 or index >= expected_holes.size():
+			continue
+		var hole_count := (stage.get("stair_hole_sides", []) as Array).size()
+		if hole_count != expected_holes[index]:
+			failures.append("floor stage %d has %d stair holes; expected %d upper-floor holes" % [index, hole_count, expected_holes[index]])
+		var grid_dimensions := stage.get("grid_dimensions", Vector2i.ZERO) as Vector2i
+		var expected_tiles := grid_dimensions.x * grid_dimensions.y - hole_count * 18
+		if index == 0:
+			expected_tiles -= 36
+			if (
+				not bool(stage.get("base_99_100_atrium_enabled", false))
+				or int(stage.get("base_99_100_atrium_tile_count", 0)) != 36
+			):
+				failures.append("100层缺少基地99/100层6×6贯通中庭")
+		elif index == 1:
+			# 99F通用可视地砖会避开基地正式地板，承重面仍完整保留。
+			expected_tiles -= 36
+		# 入口安全房自带正式地砖，会从整层通用可视地砖里挖掉对应格数（承重面不受影响）。
+		# 该挖洞量由 stage 自己记账，必须计入期望值，否则会把有意挖洞误判成缺砖。
+		var safe_room_hole_tiles := int(stage.get("additional_visual_hole_tile_count", 0))
+		expected_tiles -= safe_room_hole_tiles
+		if int(stage.get("tile_count", -1)) != expected_tiles:
+			failures.append(
+				"floor stage %d tile coverage is incomplete: %d tiles, expected %d (stair holes %d, safe-room holes %d)"
+				% [
+					index,
+					int(stage.get("tile_count", -1)),
+					expected_tiles,
+					hole_count,
+					safe_room_hole_tiles,
+				]
+			)
+
+	_validate_player_light_shadow_separation(tower.player, failures)
+	_finish(failures)
+
+
+func _validate_stairwell_5m_contract(
+	connector: Node3D,
+	failures: Array[String]
+) -> void:
+	if connector.get_meta("stair_footprint_size_m", Vector2.ZERO) != Vector2(15.0, 30.0):
+		failures.append("%s stair footprint contract is not 15x30m" % connector.name)
+	if not is_equal_approx(float(connector.get_meta("stair_lower_landing_raise_m", 0.0)), 0.1):
+		failures.append("%s lower landing clearance contract is not 0.1m" % connector.name)
+	var imported: Node3D = null
+	for child_value in connector.get_children():
+		var child := child_value as Node3D
+		if child != null and child.name.begins_with("ImportedStairwell"):
+			imported = child
+			break
+	if imported == null:
+		failures.append("%s has no imported 12m stairwell v002" % connector.name)
+		return
+	if (
+		str(imported.get_meta("asset_version", "")) != "v002"
+		or str(imported.get_meta("blender_source_version", "")) != "v021"
+	):
+		failures.append("%s does not use Blender v021 / 12m stair art asset v002" % connector.name)
+
+	var has_art_visual := false
+	var walkable_count := 0
+	var enclosure_count := 0
+	for mesh_value in imported.find_children("*", "MeshInstance3D", true, false):
+		var mesh := mesh_value as MeshInstance3D
+		if mesh == null or mesh.mesh == null:
+			continue
+		if "StairwellArt_VisualOnly" in mesh.name:
+			has_art_visual = true
+		elif "Walkable" in mesh.name:
+			walkable_count += 1
+		elif "EnclosureWall_" in mesh.name:
+			enclosure_count += 1
+	if not has_art_visual:
+		failures.append("%s v021 art visual batch is missing" % connector.name)
+	if walkable_count != 1:
+		failures.append("%s does not have one optimized walkable collision mesh" % connector.name)
+	if enclosure_count != 1:
+		failures.append("%s does not have one optimized enclosure collision mesh" % connector.name)
+	var camera_slab_count := 0
+	var lower_camera_slab_count := 0
+	var camera_wall_proxy_count := 0
+	var guard_collision_count := 0
+	var full_run_guard_count := 0
+	var landing_guard_count := 0
+	var support_raise_verified := false
+	for body_value in connector.find_children("*", "StaticBody3D", true, false):
+		var body := body_value as StaticBody3D
+		if body == null:
+			continue
+		if bool(body.get_meta("camera_stair_slab", false)):
+			camera_slab_count += 1
+			if str(body.get_meta("camera_stair_slab_role", "")) == "lower":
+				lower_camera_slab_count += 1
+		if bool(body.get_meta("stair_camera_wall_proxy", false)):
+			camera_wall_proxy_count += 1
+		if bool(body.get_meta("stair_guard_collision", false)):
+			if (
+				"UpperLanding" not in body.name
+				and not is_equal_approx(float(body.get_meta("stair_guard_visual_half_width_m", 0.0)), 2.15)
+			):
+				failures.append("%s flight guard is not aligned to v021 visible railing" % connector.name)
+			for shape_value in body.find_children("*", "CollisionShape3D", true, false):
+				var guard_shape := shape_value as CollisionShape3D
+				if guard_shape != null and guard_shape.shape != null:
+					guard_collision_count += 1
+					if bool(body.get_meta("stair_guard_full_coverage", false)):
+						if "UpperLanding" in body.name:
+							landing_guard_count += 1
+						else:
+							full_run_guard_count += 1
+		if body.name == "StairUnifiedSupport":
+			support_raise_verified = (
+				is_zero_approx(float(body.get_meta("stair_surface_raise_m", -1.0)))
+				and int(body.get_meta("stair_flight_plane_count", 0)) == 2
+				and int(body.get_meta("stair_surface_segment_count_per_flight", 0)) == 1
+			)
+	if camera_slab_count != 1 or lower_camera_slab_count != 1:
+		failures.append("%s must keep only the lower-flight camera slab" % connector.name)
+	if camera_wall_proxy_count != 1:
+		failures.append("%s v002 south-wall camera-only collision proxy is missing" % connector.name)
+	if guard_collision_count != 6:
+		failures.append("%s must own four flight guards and two upper-landing edge guards" % connector.name)
+	if full_run_guard_count != 4 or landing_guard_count != 2:
+		failures.append("%s railing blockers do not cover both flights and both landing edge segments" % connector.name)
+	if not support_raise_verified:
+		failures.append("%s must use exactly one flush slope plane per flight" % connector.name)
+	var smooth_support_count := 0
+	for collision_value in connector.find_children("ContinuousFloorFlightsLanding", "CollisionShape3D", true, false):
+		var collision := collision_value as CollisionShape3D
+		if collision != null and bool(collision.get_meta("persistent_stair_support", false)):
+			smooth_support_count += 1
+	if smooth_support_count != 1:
+		failures.append("%s does not provide continuous Godot stair/floor support" % connector.name)
+
+
+func _validate_stair_approach_wall_modules(
+	connector: Node3D,
+	failures: Array[String]
+) -> void:
+	var visual_count := 0
+	var collision_count := 0
+	for node_value in connector.find_children("*", "Node3D", true, false):
+		var node := node_value as Node3D
+		if node == null:
+			continue
+		if (
+			str(node.get_meta("asset_id", "")) == "ENV-TOWER-WALL-SOLID-5M"
+			and bool(node.get_meta("stair_approach_corridor", false))
+		):
+			visual_count += 1
+			if (
+				not bool(node.get_meta("uses_native_wall_visual_height", false))
+				or str(node.get_meta("source_visual_version", "")) != "v004"
+			):
+				failures.append("%s stair approach wall does not use native v004 height" % node.name)
+			var mesh_instance := _find_first_mesh_instance(node)
+			if mesh_instance == null or mesh_instance.mesh == null:
+				failures.append("%s stair approach wall has no visual mesh" % node.name)
+				continue
+			var world_bounds := mesh_instance.global_transform * mesh_instance.mesh.get_aabb()
+			if not is_equal_approx(world_bounds.size.y, TowerGeometry3D.WALL_VISUAL_HEIGHT_M):
+				failures.append("%s stair approach visual is not 11.9m high" % node.name)
+			if not is_equal_approx(world_bounds.position.y, node.global_position.y):
+				failures.append("%s stair approach visual bottom left the floor datum" % node.name)
+			if (
+				int(connector.get_meta("upper_floor_index", -1)) == 0
+				and int(connector.get_meta("lower_floor_index", -1)) == 1
+				and "Lower" in node.name
+				and not is_equal_approx(world_bounds.end.y, -0.1)
+			):
+				failures.append("%s still shares Y=0 with the 100F floor" % node.name)
+		if node is StaticBody3D and node.name.begins_with("StairApproachWall_"):
+			var body := node as StaticBody3D
+			if body.get_child_count() <= 0:
+				continue
+			var collision := body.get_child(0) as CollisionShape3D
+			var shape := collision.shape as BoxShape3D if collision != null else null
+			if shape != null:
+				collision_count += 1
+				if not is_equal_approx(shape.size.y, TowerGeometry3D.WALL_LOGICAL_HEIGHT_M):
+					failures.append("%s stair approach collision is not 12m high" % node.name)
+	if visual_count > 0 and collision_count <= 0:
+		failures.append("%s stair approach lost its continuous 12m side-wall colliders" % connector.name)
+
+
+## 楼梯接驳走廊两侧墙的**朝向**验收。
+## 墙件（塔楼 A 套 ENV-TOWER-WALL-SOLID-5M）装饰面朝局部 +Z，而走廊是通道 ⇒
+## 两侧墙必须「装饰面各自朝走廊内」。此前两侧共用同一个 rotation_y，世界南（东）侧
+## 那面把结构背板朝向通道 —— 2026-10-12 主人报「99F 基地东西两条走廊的南面墙反面
+## 朝走廊」。包络 / 面数 / 高度三类断言对「一面朝反」全都全绿，所以必须单独盯朝向。
+func _validate_stair_approach_wall_facings(
+	connector: Node3D,
+	failures: Array[String]
+) -> void:
+	# 中线真源 = 同 module 序号的接驳地砖（墙就摆在它的垂直 ±半宽处）。
+	var centers := {}
+	for value in connector.find_children("StairApproachFloor_*", "Node3D", true, false):
+		var floor_tile := value as Node3D
+		if floor_tile == null:
+			continue
+		centers[_trailing_module_key(floor_tile.name)] = floor_tile.global_position
+	var checked := 0
+	for value in connector.find_children("StairApproachWall_*", "Node3D", true, false):
+		var wall := value as Node3D
+		if wall == null or wall is StaticBody3D:
+			continue
+		if str(wall.get_meta("asset_id", "")) != "ENV-TOWER-WALL-SOLID-5M":
+			continue
+		var module_key := _trailing_module_key(wall.name)
+		if not centers.has(module_key):
+			continue
+		var inward := (centers[module_key] as Vector3) - wall.global_position
+		inward.y = 0.0
+		if inward.length() < 0.01:
+			continue
+		var facing := wall.global_transform.basis * Vector3(0.0, 0.0, 1.0)
+		facing.y = 0.0
+		var alignment := facing.normalized().dot(inward.normalized())
+		checked += 1
+		if alignment < 0.9:
+			failures.append(
+				"%s 装饰面没有朝走廊内（对齐 %.3f，应≈1）" % [wall.name, alignment]
+			)
+	if _has_stair_approach_wall_visual(connector) and checked <= 0:
+		failures.append("%s stair approach walls produced no facing samples" % connector.name)
+
+
+## 只用于「有没有可采样墙」的守卫：与 _validate_stair_approach_wall_modules 同判据。
+func _has_stair_approach_wall_visual(connector: Node3D) -> bool:
+	for value in connector.find_children("*", "Node3D", true, false):
+		var node := value as Node3D
+		if node != null and bool(node.get_meta("stair_approach_corridor", false)):
+			return true
+	return false
+
+
+func _trailing_module_key(node_name: String) -> String:
+	return node_name.get_slice("_", node_name.get_slice_count("_") - 1)
+
+
+func _find_first_mesh_instance(root: Node) -> MeshInstance3D:
+	if root is MeshInstance3D and (root as MeshInstance3D).mesh != null:
+		return root as MeshInstance3D
+	for child in root.get_children():
+		var found := _find_first_mesh_instance(child)
+		if found != null:
+			return found
+	return null
+
+
+func _validate_horizontal_corridor_modules(
+	connector: Node3D,
+	start: Vector3,
+	end: Vector3,
+	failures: Array[String]
+) -> void:
+	var length := start.distance_to(end)
+	if length <= 0.05:
+		if (
+			int(connector.get_meta("module_count", -1)) != 0
+			or int(connector.get_meta("floor_module_count", -1)) != 0
+			or int(connector.get_meta("wall_module_count", -1)) != 0
+		):
+			failures.append("%s shared-wall connector created zero-length collision modules" % connector.name)
+		return
+	var expected_modules := maxi(
+		1,
+		int(round(length / TowerGeometry3D.GRID_UNIT_M))
+	)
+	var floor_batch: MultiMeshInstance3D = null
+	var wall_batch: MultiMeshInstance3D = null
+	var collision_bodies: Array[StaticBody3D] = []
+	for child_value in connector.get_children():
+		var child := child_value as Node3D
+		if child == null:
+			continue
+		if child is MultiMeshInstance3D and bool(child.get_meta("horizontal_corridor_module_batch", false)):
+			match str(child.get_meta("asset_id", "")):
+				"ENV-TOWER-FLOOR-TILE-5M":
+					floor_batch = child as MultiMeshInstance3D
+				"ENV-TOWER-WALL-SOLID-5M":
+					wall_batch = child as MultiMeshInstance3D
+		if child is StaticBody3D and child.name.begins_with("CorridorWallCollision_"):
+			collision_bodies.append(child as StaticBody3D)
+	var floor_instance_count := (
+		floor_batch.multimesh.instance_count
+		if floor_batch != null and floor_batch.multimesh != null
+		else -1
+	)
+	var wall_instance_count := (
+		wall_batch.multimesh.instance_count
+		if wall_batch != null and wall_batch.multimesh != null
+		else -1
+	)
+	if (
+		int(connector.get_meta("module_count", -1)) != expected_modules
+		or int(connector.get_meta("floor_module_count", -1)) != expected_modules
+		or int(connector.get_meta("wall_module_count", -1)) != expected_modules * 2
+		or floor_instance_count != expected_modules
+		or wall_instance_count != expected_modules * 2
+		or not is_equal_approx(
+			float(connector.get_meta("module_coverage_length_m", -1.0)),
+			length
+		)
+	):
+		failures.append(
+			"%s %.1fm corridor visual coverage is not %d floors + %d walls" % [
+				connector.name,
+				length,
+				expected_modules,
+				expected_modules * 2,
+			]
+		)
+	var along_x := absf(end.x - start.x) >= absf(end.z - start.z)
+	var floor_origins := (
+		floor_batch.get_meta("corridor_module_origins", PackedVector3Array())
+		if floor_batch != null
+		else PackedVector3Array()
+	) as PackedVector3Array
+	var wall_origins := (
+		wall_batch.get_meta("corridor_module_origins", PackedVector3Array())
+		if wall_batch != null
+		else PackedVector3Array()
+	) as PackedVector3Array
+	if floor_origins.size() != expected_modules or wall_origins.size() != expected_modules * 2:
+		failures.append("%s does not retain its generated module coordinates" % connector.name)
+	for origin in floor_origins:
+		if (
+			not TowerGeometry3D.is_component_axis_aligned(origin.x, 5.0)
+			or not TowerGeometry3D.is_component_axis_aligned(origin.z, 5.0)
+		):
+			failures.append("%s floor module is off the 5m grid: %s" % [connector.name, origin])
+	for origin in wall_origins:
+		var along_position := origin.x if along_x else origin.z
+		if not TowerGeometry3D.is_component_axis_aligned(along_position, 5.0):
+			failures.append("%s wall module is off the 5m lane: %s" % [connector.name, origin])
+		var wall_aabb := (
+			wall_batch.multimesh.mesh.get_aabb()
+			if wall_batch != null
+			and wall_batch.multimesh != null
+			and wall_batch.multimesh.mesh != null
+			else AABB()
+		)
+		var wall_visual_scale_y := (
+			wall_batch.multimesh.get_instance_transform(0).basis.y.length()
+			if wall_batch != null
+			and wall_batch.multimesh != null
+			and wall_batch.multimesh.instance_count > 0
+			else 1.0
+		)
+		var wall_bottom_y := origin.y + wall_aabb.position.y * wall_visual_scale_y
+		if not is_equal_approx(wall_bottom_y, start.y):
+			failures.append(
+				"%s wall module floats %.3fm above its floor" % [
+					connector.name,
+					wall_bottom_y - start.y,
+				]
+			)
+		if not is_equal_approx(
+			wall_aabb.size.y * wall_visual_scale_y,
+			TowerGeometry3D.WALL_VISUAL_HEIGHT_M
+		):
+			failures.append("%s wall visual module is not 11.9m high" % connector.name)
+	if collision_bodies.size() != 2:
+		failures.append("%s must keep exactly two continuous side-wall colliders" % connector.name)
+	for body in collision_bodies:
+		var collision := body.get_child(0) as CollisionShape3D if body.get_child_count() > 0 else null
+		var shape := collision.shape as BoxShape3D if collision != null else null
+		var collision_length := (
+			shape.size.x if shape != null and along_x
+			else shape.size.z if shape != null
+			else -1.0
+		)
+		if not is_equal_approx(collision_length, length):
+			failures.append("%s visible modules and collision length differ" % connector.name)
+	# 水平走廊两侧墙同样必须「装饰面各自朝走廊内」（与楼梯接驳走廊同一口径）。
+	# MultiMesh 的 transform 在 headless dummy 渲染器下读不回来，所以读生成期
+	# 记下的 corridor_wall_facings（局部 +Z 经实例 basis 变换后的世界水平法向）。
+	var wall_facings := (
+		wall_batch.get_meta("corridor_wall_facings", PackedVector3Array())
+		if wall_batch != null
+		else PackedVector3Array()
+	) as PackedVector3Array
+	if wall_facings.size() != wall_origins.size():
+		failures.append("%s lost its corridor wall facing samples" % connector.name)
+	else:
+		for index in range(wall_facings.size()):
+			var wall_origin := wall_origins[index]
+			var lane_point := (
+				Vector3(wall_origin.x, 0.0, start.z)
+				if along_x
+				else Vector3(start.x, 0.0, wall_origin.z)
+			)
+			var inward := lane_point - Vector3(wall_origin.x, 0.0, wall_origin.z)
+			if inward.length() < 0.01:
+				continue
+			if wall_facings[index].dot(inward.normalized()) < 0.9:
+				failures.append(
+					"%s corridor wall module #%d 装饰面未朝走廊内" % [connector.name, index]
+				)
+
+
+func _validate_room_door(room: DungeonRoom3D, side: String, failures: Array[String]) -> void:
+	var door := room.get_door_node(side)
+	if door == null:
+		failures.append("%s %s interaction door is missing" % [room.room_id, side])
+		return
+	var module := _find_door_wall_module(room, side)
+	if module == null:
+		failures.append("%s %s 5m door-wall component is missing" % [room.room_id, side])
+		return
+	if door.global_position.distance_to(module.global_position) > 0.01:
+		failures.append("%s %s interaction door and mesh component differ by %.3fm" % [room.room_id, side, door.global_position.distance_to(module.global_position)])
+	var perpendicular := door.global_position.z if side in ["north", "south"] else door.global_position.x
+	var along := door.global_position.x if side in ["north", "south"] else door.global_position.z
+	if not is_equal_approx(perpendicular, snappedf(perpendicular, TowerGeometry3D.GRID_UNIT_M)):
+		failures.append("%s %s wall boundary is not on a 5m grid line" % [room.room_id, side])
+	if not is_equal_approx(along, snappedf(along - 2.5, TowerGeometry3D.GRID_UNIT_M) + 2.5):
+		failures.append("%s %s door center is not on a 5m tile center" % [room.room_id, side])
+
+
+func _find_door_wall_module(root: Node, side: String) -> Node3D:
+	if (
+		root is Node3D
+		and str(root.get_meta("asset_id", "")) in [
+			"ENV-TOWER-WALL-DOOR-5M",
+			"ENV-BASE99-WALL-DOOR-5X12",
+			# 98F/78F 入口安全房（STAIR_LOBBY）已换成战局区块通用组件库 v004，
+			# 门墙是同一 5m 规格（2.2×2.5 门洞、原点坐边界网格线），只是换库换名。
+			"ENV-BATTLE-COMMON-WALL-DOOR-5M",
+		]
+		and str(root.get_meta("tower_wall_direction", "")) == side
+	):
+		return root as Node3D
+	for child in root.get_children():
+		var found := _find_door_wall_module(child, side)
+		if found != null:
+			return found
+	return null
+
+
+func _validate_key_door(
+	room_by_id: Dictionary,
+	room_id: String,
+	side: String,
+	expected: Vector3,
+	failures: Array[String]
+) -> void:
+	var room := room_by_id.get(room_id) as DungeonRoom3D
+	var door := room.get_door_node(side) if room != null else null
+	if door == null or door.global_position.distance_to(expected) > 0.01:
+		failures.append("%s %s key door is at %s, expected %s" % [room_id, side, door.global_position if door != null else Vector3.INF, expected])
+
+
+func _validate_player_light_shadow_separation(player: Player3D, failures: Array[String]) -> void:
+	var caster_count := 0
+	for mesh_value in player.avatar.find_children("*", "MeshInstance3D", true, false):
+		var mesh := mesh_value as MeshInstance3D
+		if mesh.cast_shadow == GeometryInstance3D.SHADOW_CASTING_SETTING_ON:
+			caster_count += 1
+	if player.weapon != null:
+		for mesh_value in player.weapon.find_children("*", "MeshInstance3D", true, false):
+			var mesh := mesh_value as MeshInstance3D
+			if mesh.cast_shadow == GeometryInstance3D.SHADOW_CASTING_SETTING_ON:
+				caster_count += 1
+	if caster_count <= 0:
+		failures.append("player/avatar/held weapon cannot cast shadows from sun or room lights")
+	var flashlight := player.get_node_or_null("PlayerFlashlight3D") as PlayerFlashlight3D
+	if flashlight == null:
+		failures.append("player flashlight rig is missing")
+		return
+	var snapshot := flashlight.get_snapshot()
+	if (
+		int(snapshot.get("environment_light_cull_mask", 0)) != 1
+		or int(snapshot.get("environment_shadow_caster_mask", 0)) != 1
+		or int(snapshot.get("avatar_light_cull_mask", 0)) != 2
+		or int(snapshot.get("shadow_light_count", 0)) != 1
+		or not bool(snapshot.get("shadow_light_disabled_for_avatar", false))
+	):
+		failures.append("player-mounted three-light rig can still self-shadow the avatar")
+	var beam := flashlight.get_node_or_null("FlashlightKit/ForwardBeam") as SpotLight3D
+	if beam == null or beam.shadow_caster_mask != 1:
+		failures.append("forward beam shadow map still includes the player render layer")
+
+
+func _finish(failures: Array[String]) -> void:
+	if failures.is_empty():
+		print("TOWER_GRID_COMPONENT_ALIGNMENT_OK: 5m bounds, real door meshes, corridors, floor coverage and per-light avatar shadow separation pass")
+		get_tree().quit(0)
+		return
+	for failure in failures:
+		push_error(failure)
+	get_tree().quit(1)

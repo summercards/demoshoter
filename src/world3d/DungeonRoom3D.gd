@@ -1,0 +1,6277 @@
+class_name DungeonRoom3D
+extends Node3D
+## 3D 房间构造器：房型、大小、门、家具、搜索点、服务点和灯具都通过配置组合。
+## 几何全部由 prefab .tscn 提供；脚本只做"找 prefab → 实例化 → 设位置/缩放/材质"。
+
+signal player_entered(room: DungeonRoom3D)
+signal prop_searched(room: DungeonRoom3D, loot: Dictionary)
+signal service_activated(room: DungeonRoom3D, station: ServiceStation3D)
+## 灯开关被玩家切换后上行一层。与 player_entered / service_activated 同一模式：
+## 房间不自己决定"开灯后要发生什么"，只负责把事实告诉上层。
+signal light_toggled(room: DungeonRoom3D, is_on: bool)
+
+const LIGHT_SCENE: PackedScene = preload("res://assets/art/props/dungeon_3d/prp_wasteland_light_root_top3d.tscn")
+const LIGHT_SWITCH_SCENE: PackedScene = preload("res://assets/art/props/dungeon_3d/prp_room_light_switch_root_top3d.tscn")
+## 99F基地中央玩法顶灯组的数值真源（业主 2026-09-23 指定）。
+## 颜色、能量、范围、投影、闪烁与灯具外形都写在 prefab 里，可在编辑器中直接调整；
+## 代码只负责实例化、按层高常量定挂位，并把 prefab 内**所有**
+## WastelandLight3D（含后加的子灯）登记进 _room_lights，交给成对墙面开关统一控制。
+const BASE99_MAIN_LIGHT_SCENE: PackedScene = preload(
+	"res://assets/art/props/dungeon_3d/prp_base99_facility_main_light_top3d.tscn"
+)
+const FURNITURE_SCENE: PackedScene = preload("res://assets/art/props/dungeon_3d/prp_room_furniture_root_top3d.tscn")
+const SEARCH_SCENE: PackedScene = preload("res://assets/art/props/dungeon_3d/prp_search_container_root_top3d.tscn")
+const SERVICE_SCENE: PackedScene = preload("res://assets/art/props/dungeon_3d/prp_service_station_root_top3d.tscn")
+const HAZARD_SCENE: PackedScene = preload("res://assets/art/vfx/environment_3d/vfx_hazard_field_root_top3d.tscn")
+const DOOR_SCENE: PackedScene = preload("res://assets/art/props/dungeon_3d/prp_room_door_3d.tscn")
+const TOWER_GEOMETRY := preload("res://src/world3d/TowerGeometry3D.gd")
+
+# —— 5m 塔楼模块 prefab（A 节）
+const TOWER_WALL_PREFAB: PackedScene = preload(
+	"res://assets/art/props/dungeon_3d/prp_tower_wall_solid_5m.tscn"
+)
+const TOWER_DOOR_PREFAB: PackedScene = preload(
+	"res://assets/art/props/dungeon_3d/prp_tower_wall_door_5m.tscn"
+)
+# 5m 段门扇（门板）视觉：塔楼 A 套正式美术，与门墙共用 forward_axis=+Z。
+# 由战局通用组件库的「door_5m_通用包」派生而来，脚本与清单见
+# tower_descent_3d/source/door_leaf_5m/。战斗房与入口安全房共用它。
+# 门扇在厚度轴上镜面对称，故 A 套（+Z）与旧 B 套（-Z）互换外观不变。
+const TOWER_DOOR_LEAF_PREFAB: PackedScene = preload(
+	"res://assets/art/props/dungeon_3d/prp_tower_door_leaf_5m.tscn"
+)
+const TOWER_PARAPET_PREFAB: PackedScene = preload(
+	"res://assets/art/props/dungeon_3d/prp_tower_wall_parapet_5m.tscn"
+)
+const TOWER_PARAPET_DOOR_PREFAB: PackedScene = preload(
+	"res://assets/art/props/dungeon_3d/prp_tower_wall_parapet_door_5m.tscn"
+)
+# 4 拐角模块
+const TOWER_CORNER_L_PREFAB: PackedScene = preload(
+	"res://assets/art/props/dungeon_3d/prp_corner_l_5m.tscn"
+)
+# [PORT-STRIP 2026-10-21] environments moved out; optional load returns null
+var BASE99_CORNER_L_PREFAB: PackedScene = PortStripEnvAssets.scene("res://assets/art/environments/base_facility_3d/runtime/env_base99_corner_l_5m/env_base99_corner_l_5m_collision_top3d.tscn")
+const TOWER_CORNER_T_PREFAB: PackedScene = preload(
+	"res://assets/art/props/dungeon_3d/prp_corner_t_5m.tscn"
+)
+const TOWER_CORNER_X_PREFAB: PackedScene = preload(
+	"res://assets/art/props/dungeon_3d/prp_corner_x_5m.tscn"
+)
+const TOWER_CORNER_L_PARAPET_PREFAB: PackedScene = preload(
+	"res://assets/art/props/dungeon_3d/prp_corner_l_parapet_5m.tscn"
+)
+const TOWER_FLOOR_TILE_PREFAB: PackedScene = preload(
+	"res://assets/art/props/dungeon_3d/prp_tower_floor_tile_5m.tscn"
+)
+# 基地99层专属普通墙视觉。该PackedScene/GLB不持有碰撞、门或交互逻辑；
+# 结构碰撞继续由本脚本的0.30m代理负责，避免美术替换影响玩法。
+# [PORT-STRIP 2026-10-21] environments moved out; optional load returns null
+var BASE99_WALL_PLAIN_PREFAB: PackedScene = PortStripEnvAssets.scene("res://assets/art/environments/base_facility_3d/runtime/env_base99_wall_plain_5x12/env_base99_wall_plain_5x12_root_top3d.tscn")
+# [PORT-STRIP 2026-10-21] environments moved out; optional load returns null
+var BASE99_FLOOR_PLAIN_PREFAB: PackedScene = PortStripEnvAssets.scene("res://assets/art/environments/base_facility_3d/runtime/env_base99_floor_plain_5m/env_base99_floor_plain_5m_root_top3d.tscn")
+# [PORT-STRIP 2026-10-21] environments moved out; optional load returns null
+var BASE99_FLOOR_RIVET_PREFAB: PackedScene = PortStripEnvAssets.scene("res://assets/art/environments/base_facility_3d/runtime/env_base99_floor_rivet_5m/env_base99_floor_rivet_5m_root_top3d.tscn")
+# [PORT-STRIP 2026-10-21] environments moved out; optional load returns null
+var BASE99_WALL_DOOR_PREFAB: PackedScene = PortStripEnvAssets.scene("res://assets/art/environments/base_facility_3d/runtime/env_base99_wall_door_5x12/env_base99_wall_door_5x12_root_top3d.tscn")
+# [PORT-STRIP 2026-10-21] environments moved out; optional load returns null
+var BASE99_DOOR_LIFT_PREFAB: PackedScene = PortStripEnvAssets.scene("res://assets/art/environments/base_facility_3d/runtime/env_base99_door_lift_2p2x2p5/env_base99_door_lift_2p2x2p5_root_top3d.tscn")
+# —— 入口安全房（STAIR_LOBBY）v007 正式美术。
+# v007 是「单一方位」布局：南墙与东墙中段各开 2.2×2.5 门洞，其余 10 段为 5m 实墙，
+# 地面为 3×3 格棋盘地砖。运行时按本层实际门向把整房旋转 0/90/180/270°，
+# 于是任意楼层的安全房都共用同一套资产，无需按方位分版本。
+# 墙/地/门三类构件复用战局区块通用组件库 v004（自带碰撞、自带色盘），
+# 房间设施由房间包按各自 metadata 的 room_placement_position 摆位。
+# 2026-09-20：按需求移除 `central_terminal_island`（中央四屏终端岛）与
+# `west_glass_office`（西北玻璃办公室）两件，包数 17 → 15。两件的资产文件、
+# manifest 与台账行仍留在库里（可随时恢复），只是不再被运行时消费 ——
+# 与 door_5m 退场同口径。
+const SAFE_ROOM_RUNTIME_ROOT := "res://assets/art/environments/tower_zones/battle/runtime/"
+const SAFE_ROOM_ART_VERSION := "v007"
+const SAFE_ROOM_ART_ASSET_ID := "ENV-BATTLE-L01-SAFE-ENTRY"
+const SAFE_ROOM_PACKAGE_IDS: Array[String] = [
+	"floor_base",
+	"overhead_services",
+	"debris_papers",
+	"north_server_00",
+	"north_server_01",
+	"north_server_02",
+	"north_server_03",
+	"north_server_04",
+	"north_server_05",
+	"north_broken_core",
+	"north_nexus_sign",
+	"east_repair_bay",
+	"east_robot_arm",
+	"office_planter",
+	"maintenance_chair",
+]
+# [PORT-STRIP 2026-10-21] environments moved out; optional load returns null
+var SAFE_ROOM_WALL_STANDARD_PREFAB: PackedScene = PortStripEnvAssets.scene("res://assets/art/environments/tower_zones/battle/runtime/common_components/wall_standard_5m/wall_standard_5m_root_top3d.tscn")
+# [PORT-STRIP 2026-10-21] environments moved out; optional load returns null
+var SAFE_ROOM_WALL_DOOR_PREFAB: PackedScene = PortStripEnvAssets.scene("res://assets/art/environments/tower_zones/battle/runtime/common_components/wall_door_5m/wall_door_5m_root_top3d.tscn")
+# 安全房门扇原走 B 套「door_5m_root_top3d.tscn / ENV-BATTLE-COMMON-DOOR-5M」。
+# 那个包的 GLB 实测只是一个 13 三角形占位方块（单材质、无面板细节），
+# 并非 door_5m_通用包 v006 的真实美术（5352 顶点 / 4 个色盘角色）。
+# 2026-09-19：门扇统一改为塔楼 A 套正式美术 TOWER_DOOR_LEAF_PREFAB，
+# 该常量随之退场。B 套那两个文件仍留在战局通用组件库里（属库的账面资产，
+# 不由本脚本消费），不再被运行时引用。
+# [PORT-STRIP 2026-10-21] environments moved out; optional load returns null
+var SAFE_ROOM_FLOOR_TILE_C01_PREFAB: PackedScene = PortStripEnvAssets.scene("res://assets/art/environments/tower_zones/battle/runtime/common_components/floor_tile_5m/floor_tile_r01_c01_root_top3d.tscn")
+# [PORT-STRIP 2026-10-21] environments moved out; optional load returns null
+var SAFE_ROOM_FLOOR_TILE_C02_PREFAB: PackedScene = PortStripEnvAssets.scene("res://assets/art/environments/tower_zones/battle/runtime/common_components/floor_tile_5m/floor_tile_r01_c02_root_top3d.tscn")
+# —— 授权布局壳体的组件 ID 契约（2026-09-20；2026-09-24 改注册表驱动）——
+# 摆位源（Blender 侧 layout.json）用组件 ID 说话，运行时用 PackedScene 说话。
+# **对齐表不在代码里**：全部来自
+#   res://assets/art/environments/tower_zones/shared/runtime/shell_component_catalog.json
+# 该注册表为每件通用件登记 `component_id`（通用件名 ENV-SHARED-GENERIC-*）+
+# `aliases`（具体批次号）+ `prefab_path`。下面这 5 个常量保留为**既有战区摆位源
+# 在用的批次号**，它们现在只是注册表里的 alias —— 任一侧改名而另一侧没跟上，
+# 注册表查不到 → _authored_component_prefab() 返回 null 并报错，不会静默换件。
+const WALL_COMPONENT_ASSET_ID := "ENV-BATTLE-COMMON-WALL-STANDARD-5M"
+# 门墙的**批次号 alias**。现在运行时不再靠它判「这堵墙是不是门墙」（门墙与否由
+# 实例循环里的 uses_door 唯一决定，比读 prefab meta 精确），只作为原批次号留档，
+# 便于与战区摆位源、注册表 alias 表逐字对照。
+const DOOR_WALL_COMPONENT_ASSET_ID := "ENV-BATTLE-COMMON-WALL-DOOR-5M"
+const FLOOR_TILE_C01_COMPONENT_ID := "ENV-BATTLE-COMMON-FLOOR-TILE-R01-C01"
+const FLOOR_TILE_C02_COMPONENT_ID := "ENV-BATTLE-COMMON-FLOOR-TILE-R01-C02"
+const OFFICE_DARK_FLOOR_TILE_ID := "ENV-EXPEDITION-L01-OFFICE-FLOOR_TILE_5M"
+const BRIDGE_DARK_UPPER_TILE_ID := "ENV-EXPEDITION-L01-BRIDGE-TILE_UPPER"
+# Boss 房 v008 自有 5m 地砖（A/B/C 三个变体，仅贴花位不同，主面哑光但偏暗）。
+# Boss 房套件本身是**独立一库**（独立目录 / 独立母版 / 独立注册表条目，不与他人混用），
+# 但主层地砖按全项目统一口径换成通用 C01/C02 棋盘砖 —— 与办公室、通道桥同一条运行时
+# 规则；墙、家具、标识、碎屑等自有结构件一律不动，套件边界不受影响。
+const BOSS_DARK_FLOOR_TILE_PREFIX := "ENV-EXPEDITION-L01-BOSS-FLOOR_TILE_5M"
+const DB_DARK_FLOOR_TILE_PREFIX := "ENV-EXPEDITION-L01-DB-FLOOR_TILE_5M"
+const CORRIDOR_DARK_FLOOR_TILE_PREFIX := "ENV-EXPEDITION-L01-CORRIDOR-FLOOR_TILE_5M"
+const BRIDGE_DOOR_VISUAL_WALL_ID := "ENV-EXPEDITION-L01-BRIDGE-WALL_X670"
+const GENERIC_SOLID_WALL_ID := "ENV-SHARED-GENERIC-WALL-STANDARD-5M"
+const CORNER_L_COMPONENT_ID := "ENV-TOWER-CORNER-L-5M"
+# 门墙的**通用件名**（注册表 primary_key）。授权布局里「门墙」不再用硬编码 prefab 常量，
+# 而是把槽位解析成这个 ID 再查注册表 —— 与实墙同一条解析路径，prefab 的唯一真源仍在注册表。
+# ⚠️ 为什么不能直接用摆位源实例自带的 component_id：`solid_wall` 实例在「门位落在实墙上」时
+# 会被提升为门墙（_build_authored_layout_shell 的 promoted），那时自带 id 仍是实墙 id，
+# 照它查表会拿回实墙 prefab，门洞就没墙承接了。
+const DOOR_WALL_COMPONENT_ID := "ENV-SHARED-GENERIC-WALL-DOOR-5M"
+# 「门开在实墙上」断言的 lane 粒度容差（米）。授权布局是相邻共墙，门槽 lane 归声明它的
+# 那个房间，邻房那一侧只有别的 lane 的实墙 —— 判据必须按 lane 而不是按 side（见
+# _build_authored_layout_shell 末尾）。0.25m 远小于 5m lane 间距（不会把邻 lane 的墙
+# 误判成占据门槽），又远大于浮点误差（能抓住「离门槽只差十几厘米」的真实错位）。
+const DOOR_LANE_GUARD_TOLERANCE_M := 0.25
+## 静态场景定朝向时「场景实例 ↔ 清单实例」的配对容差（件距 5m，留 8 倍余量）。
+const STATIC_LAYOUT_ALIGN_TOLERANCE_M := 0.6
+# v007 墙槽位表，逐项源自 source/room_instances/entry_safe_room/v007/qa/slot_table.json。
+# 每项 = [房间局部 x_m, 房间局部 z_m, Godot rotation.y_deg, 是否门墙, 原生方位]。
+# 坐标换算按 Blender Z-up → Godot Y-up：(bx, by, bz) → (bx, bz, -by)，
+# 绕 Blender +Z 的角与绕 Godot +Y 的角同号，因此 rotation_z_deg 可直接沿用。
+# 组件 forward_axis = -Z（朝房内那面即 -Z），槽位角度正好让装甲壁板朝向房内。
+const SAFE_ROOM_WALL_SLOTS: Array = [
+	[-5.0, -7.5, 180.0, false, "north"],
+	[0.0, -7.5, 180.0, false, "north"],
+	[5.0, -7.5, 180.0, false, "north"],
+	[-5.0, 7.5, 0.0, false, "south"],
+	[0.0, 7.5, 0.0, true, "south"],
+	[5.0, 7.5, 0.0, false, "south"],
+	[7.5, 5.0, 90.0, false, "east"],
+	[7.5, 0.0, 90.0, true, "east"],
+	[7.5, -5.0, 90.0, false, "east"],
+	[-7.5, 5.0, -90.0, false, "west"],
+	[-7.5, 0.0, -90.0, false, "west"],
+	[-7.5, -5.0, -90.0, false, "west"],
+]
+# 原生门轴墙：南（+Z）与东（+X）。旋转解析以这两个方向为基准集合。
+const SAFE_ROOM_DOOR_SIDES: Array[String] = ["south", "east"]
+# v007 行走面在授权文件里是 Blender z=0.30（结构板顶 0.26 + 0.04 砖面），
+# 运行时行走面是 Y=0，因此房间包整体下沉 0.30 对齐；墙体件以底面中心为原点，
+# 直接坐在 Y=0 即可与塔楼自身墙体（0..11.9）同高同缝。
+# 地砖不下沉固定值，改读每个组件自己的 snap_to_walk_plane_offset_m（c01 −0.056 / c02 −0.081）。
+const SAFE_ROOM_WALK_LIFT_M := 0.30
+const SAFE_ROOM_FLOOR_GRID_M := 5.0
+# —— 退出门内侧地面的 EXIT 霓虹灯标牌（ENV-BATTLE-EXIT-NEON-SIGN v001）——
+# 独立通用场景组件：竖立门头姿态（正面 = 本地 +Y），平铺时绕 X 轴 +90° 使发光面朝上。
+# 摆位按**世界门向**算（与门扇 _build_door 同一口径，挂房间根而不是会整房旋转的 art_root）。
+# 局部原点在「底面中心」，旋转后底边落在原点 ⇒ 需抬高半个厚度才能让背面贴地。
+# [PORT-STRIP 2026-10-21] environments moved out; optional load returns null
+var SAFE_ROOM_EXIT_SIGN_PREFAB: PackedScene = PortStripEnvAssets.scene("res://assets/art/environments/tower_zones/battle/runtime/exit_neon_sign/exit_neon_sign_root_top3d.tscn")
+const EXPEDITION_02_WALK_SURFACE_Y_M := 0.30
+const SAFE_ROOM_EXIT_SIGN_ASSET_ID := "ENV-BATTLE-EXIT-NEON-SIGN"
+# 节点名兼**幂等键**：动态壳体（`_build_safe_room_shell`）与远征静态布局
+# （`_build_shell` 的静态分支）两条路径都会生成 EXIT 标牌，靠这个名字去重。
+const SAFE_ROOM_EXIT_SIGN_NODE_NAME := "SafeRoomExitSign"
+# 标牌沿门法向的占地深度（= 组件包络的高度 0.76m）与半厚度（0.09 / 2）。
+const SAFE_ROOM_EXIT_SIGN_DEPTH_M := 0.76
+const SAFE_ROOM_EXIT_SIGN_HALF_THICKNESS_M := 0.045
+# 牌顶边离房间边界（门洞所在网格线）的水平退让，避免与门垛/门扇穿插。
+const SAFE_ROOM_EXIT_SIGN_INSET_M := 0.45
+# 四角 L 型墙角（仅远征入口安全房开启，见 safe_room_corner_l）。
+# 直接引用塔楼 A 套 prp_corner_l_5m.tscn —— 它的正式美术就是「通用房通用墙组件」两份
+# 刚性拼成的 L（来源 tower_zones/battle/source/common_components/v007 的
+# ROOT_wall_standard_5m_通用组件），与安全房其余直墙同源、同色盘（01/02/04 角色）。
+# 它比两条 0.30m 直墙正交端接多包 0.15m：可视包络 5.15×11.9×5.15 正好补上四角
+# 外侧那道 0.15×0.15 的竖直缺口。两条臂各沿边覆盖 5m ⇒ 开启后每条边只保留中段槽位。
+# 顺序是「整房旋转一步」的置换环：NW→SW→SE→NE→NW（对应 rotation.y += 90°），
+# 所以按世界角位直接摆放等价于「原生四角 + art_root 整房旋转」。
+const SAFE_ROOM_CORNER_IDS: Array[String] = ["NW", "SW", "SE", "NE"]
+# 安全房沿用塔楼房间的边界约定：组件原点坐在 ±dimensions/2（= 5m 网格线）上，
+# 墙厚向房间外侧展开。授权美术（v007 README）把外墙皮写在 7.5 / 中线 7.35，
+# 运行时统一按塔楼口径把墙件原点落在 7.5，使门洞、走廊起点与楼板 5m 网格三者同线。
+# —— 房间壳体原子件 prefab（B 节）
+const FLOOR_PREFAB: PackedScene = preload("res://assets/art/props/dungeon_3d/prp_room_floor.tscn")
+const FLOOR_INSET_PREFAB: PackedScene = preload("res://assets/art/props/dungeon_3d/prp_room_floor_inset.tscn")
+const FLOOR_SEAM_PREFAB: PackedScene = preload("res://assets/art/props/dungeon_3d/prp_room_floor_seam_strip.tscn")
+const WALL_SEGMENT_PREFAB: PackedScene = preload("res://assets/art/props/dungeon_3d/prp_room_wall_segment.tscn")
+const WALL_DOOR_SEGMENT_PREFAB: PackedScene = preload("res://assets/art/props/dungeon_3d/prp_room_wall_door_segment.tscn")
+const DOOR_LINTEL_PREFAB: PackedScene = preload("res://assets/art/props/dungeon_3d/prp_room_door_lintel.tscn")
+const CORNER_POST_PREFAB: PackedScene = preload("res://assets/art/props/dungeon_3d/prp_room_corner_post.tscn")
+const PARTITION_VERTICAL_PREFAB: PackedScene = preload("res://assets/art/props/dungeon_3d/prp_room_floor_partition_vertical.tscn")
+const PARTITION_HORIZONTAL_PREFAB: PackedScene = preload("res://assets/art/props/dungeon_3d/prp_room_floor_partition_horizontal.tscn")
+# —— 楼顶/楼梯厅装饰 prefab（C 节）
+const ROOFTOP_FACADE_PREFAB: PackedScene = preload("res://assets/art/props/dungeon_3d/prp_room_rooftop_facade.tscn")
+const ROOFTOP_FACADE_BAND_PREFAB: PackedScene = preload("res://assets/art/props/dungeon_3d/prp_room_rooftop_facade_band.tscn")
+const ROOFTOP_RAIL_LOWER_PREFAB: PackedScene = preload("res://assets/art/props/dungeon_3d/prp_room_rooftop_railing_lower.tscn")
+const ROOFTOP_RAIL_UPPER_PREFAB: PackedScene = preload("res://assets/art/props/dungeon_3d/prp_room_rooftop_railing_upper.tscn")
+const ROOFTOP_RAIL_POST_PREFAB: PackedScene = preload("res://assets/art/props/dungeon_3d/prp_room_rooftop_rail_post.tscn")
+const ROOFTOP_STAIR_FRAME_POST_PREFAB: PackedScene = preload("res://assets/art/props/dungeon_3d/prp_room_rooftop_stair_frame_post.tscn")
+const ROOFTOP_STAIR_FRAME_LINTEL_PREFAB: PackedScene = preload("res://assets/art/props/dungeon_3d/prp_room_rooftop_stair_frame_lintel.tscn")
+const ROOFTOP_DESCENT_MARKER_PREFAB: PackedScene = preload("res://assets/art/props/dungeon_3d/prp_room_rooftop_descent_marker.tscn")
+const STAIR_LOBBY_ROUTE_GUIDE_PREFAB: PackedScene = preload("res://assets/art/props/dungeon_3d/prp_room_stair_lobby_route_guide.tscn")
+const STAIR_LOBBY_THRESHOLD_GUIDE_PREFAB: PackedScene = preload("res://assets/art/props/dungeon_3d/prp_room_stair_lobby_threshold_guide.tscn")
+const ACCESS_STEP_PREFAB: PackedScene = preload("res://assets/art/props/dungeon_3d/prp_room_access_step.tscn")
+const VERTICAL_ACCESS_LABEL_PREFAB: PackedScene = preload("res://assets/art/props/dungeon_3d/prp_room_vertical_access_marker_label.tscn")
+# [PORT-STRIP 2026-10-21] environments moved out; optional load returns null
+var FLOOR_TILE_MATERIAL_LIGHT: StandardMaterial3D = PortStripEnvAssets.asset("res://assets/art/environments/tower_descent_3d/components/mat_tower_floor_tile_override_top3d_v001.tres")
+# [PORT-STRIP 2026-10-21] environments moved out; optional load returns null
+var FLOOR_TILE_MATERIAL_DARK: StandardMaterial3D = PortStripEnvAssets.asset("res://assets/art/environments/tower_descent_3d/components/mat_tower_floor_tile_dark_top3d_v001.tres")
+# v0.1 v2 拼接交替材质（A/B 微差异版）
+# [PORT-STRIP 2026-10-21] environments moved out; optional load returns null
+var FLOOR_TILE_MATERIAL_A: StandardMaterial3D = PortStripEnvAssets.asset("res://assets/art/environments/tower_descent_3d/components/mat_tower_floor_tile_warm_a_v001.tres")
+# [PORT-STRIP 2026-10-21] environments moved out; optional load returns null
+var FLOOR_TILE_MATERIAL_B: StandardMaterial3D = PortStripEnvAssets.asset("res://assets/art/environments/tower_descent_3d/components/mat_tower_floor_tile_warm_b_v001.tres")
+# [PORT-STRIP 2026-10-21] environments moved out; optional load returns null
+var WALL_SOLID_MATERIAL_A: StandardMaterial3D = PortStripEnvAssets.asset("res://assets/art/environments/tower_descent_3d/components/mat_tower_wall_solid_a_v001.tres")
+# [PORT-STRIP 2026-10-21] environments moved out; optional load returns null
+var WALL_SOLID_MATERIAL_B: StandardMaterial3D = PortStripEnvAssets.asset("res://assets/art/environments/tower_descent_3d/components/mat_tower_wall_solid_b_v001.tres")
+# —— 基地专属材质（FACILITY 房间使用，不影响战斗房 / 屋顶 / 楼梯厅）。
+# 棋盘 A 格 = 深褐主色、B 格 = 亮深褐；墙 = 尘深蓝；装饰带 trim 与地板同色系。
+# [PORT-STRIP 2026-10-21] environments moved out; optional load returns null
+var FACILITY_FLOOR_TILE_A: StandardMaterial3D = PortStripEnvAssets.asset("res://assets/art/environments/tower_descent_3d/components/mat_facility_floor_tile_a_v001.tres")
+# [PORT-STRIP 2026-10-21] environments moved out; optional load returns null
+var FACILITY_FLOOR_TILE_B: StandardMaterial3D = PortStripEnvAssets.asset("res://assets/art/environments/tower_descent_3d/components/mat_facility_floor_tile_b_v001.tres")
+# [PORT-STRIP 2026-10-21] environments moved out; optional load returns null
+var FACILITY_WALL_MATERIAL: StandardMaterial3D = PortStripEnvAssets.asset("res://assets/art/environments/tower_descent_3d/components/mat_facility_wall_v001.tres")
+# [PORT-STRIP 2026-10-21] environments moved out; optional load returns null
+var FACILITY_TRIM_MATERIAL: StandardMaterial3D = PortStripEnvAssets.asset("res://assets/art/environments/tower_descent_3d/components/mat_facility_trim_v001.tres")
+# 99层两种正式地板都以底面为原点，0.30m是共同的结构板顶面。铆钉板
+# AABB到0.395m，是因为铁皮压条和铆钉高出结构板；这些细节只负责表现，
+# 不能拿整个AABB最高点对齐，也不能生成额外阻挡。两种地板只按共同结构面
+# 对齐，承重碰撞继续完全由TowerFloorStage的统一平面负责。
+const BASE99_FLOOR_STRUCTURAL_TOP_Y_M := TOWER_GEOMETRY.FLOOR_THICKNESS_M
+# 可视结构板顶面必须与TowerFloorStage的承重面Y=0重合。通用地砖会在基地
+# 30x30m范围内让出可视网格，因此不再需要用抬高地板避开共面闪烁。
+const BASE99_FLOOR_TARGET_SURFACE_Y_M := 0.0
+const ROOFTOP_FACADE_HEIGHT := 6.0
+# 基地东侧阁楼门的外梯在接近墙面时仍处于上升坡面。99层普通墙的结构
+# 碰撞若完整顶到9m，角色胶囊会在门槛前先撞上墙体上沿。仅在上层门洞净宽
+# 内降低这段下层墙碰撞；门洞两侧继续保持完整9m阻挡，门扇仍由RoomDoor3D负责。
+const BASE_ROOFTOP_TRANSIT_DIRECTION := "east"
+const BASE_ROOFTOP_TRANSIT_CENTER_ALONG_M := -7.5
+const BASE_ROOFTOP_TRANSIT_COLLISION_TOP_M := 8.45
+# 99F基地的墙面开关成对：西墙门（→100F天台）与东墙门（→98F）各一个，
+# 均落在「门洞一侧第一个5m墙段」内、从门洞边缘再向外取1/3网格（1.667m）。
+# 西墙取门洞北侧段、东墙取门洞南侧段——两侧关于房间中心镜像对称，
+# 于是两个开关离各自门洞的距离完全相同（业主 2026-09-21 指定）。
+const FACILITY_SWITCH_SIDES: Array[String] = ["west", "east"]
+const FACILITY_SWITCH_WALL_INSET_M := 0.34
+static var _tower_solid_wall_mesh: Mesh
+static var _tower_solid_wall_preserves_palette := false
+# 资产声明的装配方式。实墙实际走 MultiMesh 批渲染（节点树被丢弃），若资产仍
+# 声明 per_instance_prefab 就是「声明与实际不符」——由 _assert_wall_instantiation()
+# 当场报错，避免后人按声明去改装配代码。
+static var _tower_solid_wall_declared_instantiation := ""
+# 装配基准 Y 偏移改为读资产声明的 origin_contract，不再从网格 AABB 反算。
+# 见 TowerGeometry3D.origin_offset_y()：美术换件时基准不随装饰件（门框等）漂移。
+static var _tower_solid_wall_origin_offset_y := 0.0
+static var _base99_solid_wall_origin_offset_y := 0.0
+static var _tower_floor_tile_mesh: Mesh
+static var _base99_solid_wall_mesh: Mesh
+static var _base99_floor_plain_mesh: Mesh
+static var _base99_floor_rivet_mesh: Mesh
+
+const ROOM_DIMENSIONS := {
+	# 约按 2D RoomData 的 0.034 m/px 映射，保留四档真实战斗尺度。
+	"small": Vector2(22.0, 18.0),
+	"medium": Vector2(32.0, 26.0),
+	"large": Vector2(44.0, 34.0),
+	"arena": Vector2(56.0, 42.0),
+	# v0.1 塔楼入口使用固定真实尺度；不改变既有四档房间契约。
+	"floor": Vector2(65.0, 65.0),
+	"rooftop": Vector2(65.0, 65.0),
+	"tower_cell": Vector2(15.0, 15.0),
+}
+
+const STREAM_DATA_ONLY := 0
+const STREAM_SHELL_READY := 1
+const STREAM_ACTIVE := 2
+const STREAM_PREFETCHING := 3
+const STREAM_HIBERNATING := 4
+const STREAM_STATE_NAMES := {
+	STREAM_DATA_ONLY: "DATA_ONLY",
+	STREAM_SHELL_READY: "SHELL_READY",
+	STREAM_ACTIVE: "ACTIVE",
+	STREAM_PREFETCHING: "PREFETCHING",
+	STREAM_HIBERNATING: "HIBERNATING",
+}
+
+# 房间归属只在角色中心真正跨过墙体内沿后成立。读档恢复、交互距离、
+# 预加载和门洞防夹各自拥有独立容差，禁止复用到这个实时归属合同。
+const ROOM_OWNERSHIP_BOUNDARY_INSET_M := 0.08
+const ROOM_OWNERSHIP_MIN_LOCAL_Y_M := -0.40
+const ROOM_OWNERSHIP_MAX_LOCAL_Y_M := 2.50
+# 普通怪最大基础占地为召唤者 1.22 × 1.2 × 0.7 = 1.0248m，额外留边缘余量。
+const SPAWN_CLEARANCE_M := 1.15
+const SPAWN_BOSS_CLEARANCE_M := 2.2
+const SPAWN_BODY_HEIGHT_M := 2.6
+const SPAWN_MAX_POINTS := 64
+## 盒内候选采样步长（米）。盒是独立采样域，密度不跟地砖走 —— 见 `_box_sample_points`。
+## 定 1.0 而非 1.5：异形房（L 型缺角、U 形空腔、非矩形凹口）里盒常只有一小片压在可通行区上，
+## 1.5 m 网格会把那一片抽成三四个点 —— 10×10 的 `box_corner_ambush` 要 6 只就取不满。
+## 步长只是采样密度，不是设计意图；把密度提上来，容量才贴近盒的真实可用面积。
+const SPAWN_BOX_SAMPLE_STEP_M := 1.0
+## 敌人实体碰撞半径（`Enemy3D` footprint 默认值）：盒内「怪与怪」的最小间距按**怪体直径**判。
+## ⚠ 不要拿 `SPAWN_CLEARANCE_M`（离墙净距，1.15）当怪半径 —— 那是给「怪与墙」留的余量，
+## 拿来当「怪与怪」的门禁会把 10×10 的盒子压到只剩 4 个落点（实测 room_01/room_04）。
+const ENEMY_BODY_RADIUS_M := 0.8
+## 盒内取点的**有界重洗**轮数。单轮「随机序 + 首适配」可能因先抽到**居中**的点而把小盒余量
+## 一次吃光（3×3 盒、间距 1.7 m 时中心到池内任一点 ≤1.414 m ⇒ 第二只无处可放），于是「本来排
+## 得下」被误判成「排不下」、触发落地平移且**随种子翻面**。首轮取不满就换种再试、取首个取满者
+## （**第 0 轮即原先的单次随机序** ⇒ 已能排下的盒位置逐字不变）。
+## 32 轮把「单轮最高约 4/7 的失败率」压到 ~1e-8，实务上等价于必成。
+const SPAWN_BOX_PICK_ATTEMPTS := 32
+## 重洗轮次间的种子步长（黄金比例常数，避开相邻轮次的相关性）。
+const SPAWN_BOX_PICK_ATTEMPT_STRIDE := 0x9E3779B1
+## 盒心「落地」搜索：只在声明位置容量不足时才启用。半径取 30 m（覆盖本关最大房的对半对角），
+## 候选按「离声明位置由近及远」试探，取第一个容量达标者 —— 漂移最小；上限 192 个候选封顶，
+## 避免极端房里逐点试算的开销失控。
+const SPAWN_BOX_SHIFT_RADIUS_M := 30.0
+const SPAWN_BOX_SHIFT_TRIES := 192
+## 触发盒最小边长（米）。业主 2026-09-26 口径：盒子是「小型单位」，**最小 2×2 m**；
+## 尺寸逐房自由可调（3×3 / 4×4 都是合法值），但不得小于本下限。
+const SPAWN_BOX_MIN_SIZE_M := 2.0
+## 地砖模数（米）。盒心必须**吸附到某块地砖的格心** —— 业主口径「以砖块为中心」，
+## 吸附后「这个房间的 01 号刷怪盒在哪」可以用「哪一块地砖」唯一描述，才能逐盒微调。
+const SPAWN_BOX_TILE_M := 5.0
+## 盒心离房墙的**默认**内缩圈数（1 圈 = 1 块地砖 = 5 m）。
+## 业主口径：「刷怪点都是靠近墙边的地砖，最好往里挪一圈到 2 圈」。
+## 逐盒可由盒子资产 `placement_policy.wall_recess_tiles` 覆盖（0 = 允许贴墙）。
+const SPAWN_BOX_WALL_RECESS_TILES := 1
+var _spawn_candidates: Array[Vector3] = []
+var _spawn_edge_candidates: Array[bool] = []
+var _spawn_blockers: Array[AABB] = []
+var _narrative_spawn_probe_frame := -1
+var _narrative_spawn_detail_id := 0
+var _spawn_available: Array[int] = []
+# 区块壳体地砖格心（5m 模数格）的半宽与命中容差。非矩形房（L / U / 工字桥）的凹口在
+# 摆位阶段就被 `point_in_polygon` 剔掉了砖，「格心集合」因此就是房内可用点的真源；
+# 触发盒的盒心吸附（`snap_box_center_to_tile`）也依赖这套格心：
+#   · `_build_spawn_points()` 只从这里取候选落点（凹口方向自然少点，不会再刷到墙外）；
+#   · `contains_world_position()` 额外要求点落在某个真砖格上（凹口不算房内）。
+# 没有地砖清单的房（v007 安全房 / 塔楼程序化房 / 旧房表）两条路都不启用，行为逐字不变。
+const AUTHORED_TILE_HALF_M := 2.5
+const AUTHORED_TILE_HIT_TOLERANCE_M := 0.01
+## 墙面开关距墙皮的内缩量（开关板材厚 0.14m，留 0.2m 净空）。与 `_place_light_switch`
+## 四个包围盒候选面用的是同一个值 —— 轮廓感知落位必须与旧落位读数一致，否则无法对照。
+const SWITCH_WALL_INSET_M := 0.34
+
+var room_id := "room_00"
+var room_type := "COMBAT"
+var size_class := "medium"
+var doors: Array[String] = []
+var door_targets: Dictionary = {}
+var door_policies: Dictionary = {}
+var theme: DungeonTheme3D
+var room_seed := 1
+var is_main_path := true
+var visited := false
+var cleared := false
+var enemy_spawn_points: Array[Vector3] = []
+var _rng := RandomNumberGenerator.new()
+var _floor_material: StandardMaterial3D
+var _wall_material: StandardMaterial3D
+var _trim_material: StandardMaterial3D
+var _detail_built := false
+var _shell_built := false
+var _detail_root: Node3D
+var _building_detail := false
+var _pending_detail_runtime_state: Dictionary = {}
+var _stream_state := -1
+var _stream_transition_count := 0
+var _last_stream_transition_msec := 0
+var _door_nodes: Dictionary = {}
+## 端口粒度的门扇：`port_id -> RoomDoor3D`。
+## `_door_nodes[direction]` 一面墙只能存一扇（兼容所有按方向取门的旧逻辑），
+## 一墙多门时全量存在这里；单门房两者内容等价。
+var _door_nodes_by_port: Dictionary = {}
+var _central_light: WastelandLight3D
+var _room_lights: Array[WastelandLight3D] = []
+var _light_switch: RoomLightSwitch3D
+# 99F基地的常驻开关全集（西墙→100F、东墙→98F）。其他房型本数组为空，
+# 只走 _light_switch 单开关路径。见 FACILITY_SWITCH_SIDES 与
+# _ensure_facility_permanent_lighting()。
+var _light_switches: Array[RoomLightSwitch3D] = []
+var custom_dimensions := Vector2.ZERO
+var tower_module_shell := false
+var open_wall_directions: Array[String] = []
+## 设计源给出的房间级刷怪计划（波次 / 每波数量 / 怪物组成）。
+## 空字典 = 该房走全局刷怪公式；非空时由 Dungeon3D._spawn_room_enemies 全量接管。
+var enemy_spawn_plan: Dictionary = {}
+## Boss 激活后的房间级并发增援计划。空字典 = 不启用；由 Dungeon3D 统一计时、刷怪和停止。
+var boss_reinforcement_plan: Dictionary = {}
+## —— 触发器刷怪（`docs/v0.1/design/触发器刷怪设计.md`）——
+## 放置层：本房摆了哪些触发盒。每项 = `{box: String, center_m: [x,z] 房间局部坐标,
+## size_m?: [w,d] 覆盖, rotation_deg?: float, delay_sec?: float}`。数组**下标即实例 id**，
+## 供调用层 `encounter.stages[].boxes` 按序引用。
+## 空数组 = 本房没有盒子 ⇒ 在 spawn_boxes_only 层里**不刷怪**（业主裁定「没盒子就不刷」）。
+var spawn_placements: Array = []
+## 调用层：第 N 波调用哪几个盒子实例。`{stages: [{boxes: [int...]}], intermission_sec: float}`。
+## 空字典 = 全部实例并进一波（运行时口径）。推进仍复用既有波次机制。
+var encounter: Dictionary = {}
+## 「只认盒子」层标记（层里写一次、逐房下发）：置真时本房**没摆盒子就不刷怪**，
+## 绝不回退旧的公式/房型/设计源路径。业主裁定 2026-09-26「全废弃，没盒子就不刷」。
+## 缺省 false ⇒ 未迁移关卡（塔楼各层）行为逐字不变。
+var spawn_boxes_only := false
+## 设计源给出的房间级统一掉落计划（04 §22.7）：键 = trigger（clear / search / kill），
+## 值 = 槽位引用（`{spec_id}` / `{entries}` / `{pool_id}`）。空字典 = 本房不覆盖，
+## 由 RewardService.resolve_dispatch 的覆盖链逐级回退（关卡 → 怪物表 → 全局默认）。
+## **只承载不解释**：本类不解析规格、不抽表 —— 抽表只有 RewardService 一处。
+var reward_plan: Dictionary = {}
+## 入口安全房四角是否补 L 型墙角（默认关：塔楼安全房保持 12 段直墙口径）。
+## 只由「远征关卡」的房间记录置真，见 TowerDescent3D._build_expedition_records()。
+var safe_room_corner_l := false
+## —— 授权布局壳体（2026-09-20，区块00「主人的办公室」）——
+## 置真时本房**不生成任何程序化壳体**（4 墙 + 角柱 + 地板 + 天花 + 安全房 v007 整房），
+## 壳体全部由外部摆位源给出的 5m 组件实例清单拼出；本脚本只负责
+##   ① 按清单实例化组件（墙/门墙/地砖/L 角件），② 在门槽处把实墙顶替成门墙，
+##   ③ 仍然生成本房自己的 RoomDoor3D 通行门（门的开合/碰撞归它，不归组件）。
+## 清单里的 `door_leaf_preview` 是编辑器预览件，运行时**必须跳过**，
+## 否则会和 RoomDoor3D 的门扇重叠。
+var authored_layout_shell := false
+## 授权壳体实例清单（**房间局部坐标**，见 Block00MasterOfficeLayout3D.room_shell_instances）。
+## 每项 = { name, component_id, slot_role, corner_id, position: Vector3, rotation_y_deg: float }。
+var authored_layout_instances: Array = []
+var authored_layout_asset_id := ""
+var authored_layout_version := ""
+var authored_layout_room_id := ""
+## 和平区（区块00「主人的办公室」等叙事固定关卡）：本房所属区域**不刷怪、门只做普通开关**
+## （无清房 / 无钥匙 / 无命运卡），门扇沿用 99F 基地的滑升门。开关声明在
+## `Block00MasterOfficeLayout3D.PEACEFUL_ZONE`，一路透传到 Dungeon3D 的三个消费点：
+## `_spawn_room_enemies()`（不刷怪）、`_door_policies_for_record()`（门策略全放行）、
+## `_build_door()`（基地门扇）。默认 false = 未声明的区域行为一字不变。
+var authored_layout_peaceful := false
+## 是否允许本房程序生成可搜索设施；false 时仍按 prop_count 生成普通家具。
+## 默认 true 保持未声明房间既有行为不变。
+var search_facilities_enabled := true
+## 本房**初始灯就亮**（不经玩家按开关、不播启动序列）。给「开局第一间房」用 ——
+## 玩家一睁眼不该是黑的。默认 false = 老行为（只有 STAIR_LOBBY / BOSS 默认亮）。
+var authored_room_light_on := false
+## 本房**是否持有可交互的墙面灯开关**。false = 常亮房：既有静态开关会被摘掉、
+## 运行时也不再自建，灯组一律点亮（玩家没有关灯入口）。
+##
+## 声明落在房间静态布局的 `metadata/authored_room_light_switch`，
+## 缺省 true = 保持旧行为（按钮房型默认自建开关）。
+## 先例：98F 区块00 第三间（`ENV-BATTLE-BLOCK00-ART-LAYOUT-3D` / corridor）。
+##
+## 🔴 只做「摘开关 + 亮灯」，**不动** `_room_lights` 的构成与数值：
+##    灯型、能量、范围、阴影仍由房型公式或静态布局决定。
+var authored_room_light_switch := true
+## 主通行层地砖格心（房间局部 Y=0，与装配吸附规则一致），不含多层坑底砖。
+## 房间归属仍兼容无清单的旧矩形房；刷怪对 authored_layout_shell 空地板则拒绝回退。
+var _authored_tile_cells: Array[Vector3] = []
+## 生成房间 TSCN 时临时关闭静态场景消费，确保生成器从正式 JSON/代码链提取源壳体；
+## 正式游戏保持 true，只加载已保存的房间场景，不再逐组件灌入静态视觉。
+static var use_expedition_static_layout_scenes := true
+var static_layout_scene_path := ""
+## 房间局部连接端口：每项含稳定 port_id、目标房间、局部位置、朝外法线和最终 side/lane。
+## 未连接端口 target_room_id=""，其墙槽必须保持实墙。
+var connection_ports: Array = []
+## 仅由 expedition_02 的关卡数据提供；空字典表示沿用默认镜头。
+var camera_profile: Dictionary = {}
+## side -> bool。显式端口关卡中一条边只有父端为 true；子端绑定同一扇共享门。
+## 空字典表示旧关卡，仍保持每房自持门的兼容行为。
+var door_endpoint_owners: Dictionary = {}
+## 传送支线位点（支线秘密房间设计 §3.2）：本房哪面墙上有可打破的隐藏门。
+## `{site_id, pair_id, role, wall}`；空字典 = 本房无位点。
+## 本房**不建门、不管传送** —— 建门与传送都归 Dungeon3D；这里只承载声明，
+## 让位点随房间节点一起流送/卸载。
+var secret_site: Dictionary = {}
+
+
+func configure(config: Dictionary) -> void:
+	room_id = str(config.get("room_id", room_id))
+	room_type = str(config.get("room_type", room_type)).to_upper()
+	size_class = str(config.get("size_class", size_class))
+	doors.assign(config.get("doors", []))
+	door_targets = (config.get("door_targets", {}) as Dictionary).duplicate(true)
+	door_policies = (config.get("door_policies", {}) as Dictionary).duplicate(true)
+	theme = config.get("theme", theme) as DungeonTheme3D
+	room_seed = int(config.get("seed", room_seed))
+	is_main_path = bool(config.get("is_main_path", is_main_path))
+	custom_dimensions = config.get("custom_dimensions", custom_dimensions) as Vector2
+	tower_module_shell = bool(config.get("tower_module_shell", tower_module_shell))
+	open_wall_directions.assign(config.get("open_wall_directions", []))
+	enemy_spawn_plan = (config.get("enemy_spawn_plan", enemy_spawn_plan) as Dictionary).duplicate(true)
+	boss_reinforcement_plan = (
+		config.get("boss_reinforcement_plan", boss_reinforcement_plan) as Dictionary
+	).duplicate(true)
+	_build_boss_reinforcement_markers()
+	spawn_placements = (config.get("spawn_placements", spawn_placements) as Array).duplicate(true)
+	encounter = (config.get("encounter", encounter) as Dictionary).duplicate(true)
+	spawn_boxes_only = bool(config.get("spawn_boxes_only", spawn_boxes_only))
+	reward_plan = (config.get("reward_plan", reward_plan) as Dictionary).duplicate(true)
+	safe_room_corner_l = bool(config.get("safe_room_corner_l", safe_room_corner_l))
+	authored_layout_shell = bool(config.get("authored_layout_shell", authored_layout_shell))
+	authored_layout_instances = (config.get("authored_layout_instances", []) as Array).duplicate(true)
+	authored_layout_asset_id = str(config.get("authored_layout_asset_id", authored_layout_asset_id))
+	authored_layout_version = str(config.get("authored_layout_version", authored_layout_version))
+	authored_layout_room_id = str(config.get("authored_layout_room_id", authored_layout_room_id))
+	authored_layout_peaceful = bool(config.get("authored_layout_peaceful", authored_layout_peaceful))
+	search_facilities_enabled = bool(config.get("search_facilities_enabled", search_facilities_enabled))
+	authored_room_light_on = bool(config.get("authored_room_light_on", authored_room_light_on))
+	static_layout_scene_path = str(config.get("static_layout_scene_path", static_layout_scene_path))
+	connection_ports = (config.get("connection_ports", connection_ports) as Array).duplicate(true)
+	camera_profile = (config.get("camera_profile", camera_profile) as Dictionary).duplicate(true)
+	door_endpoint_owners = (
+		config.get("door_endpoint_owners", door_endpoint_owners) as Dictionary
+	).duplicate(true)
+	secret_site = (config.get("secret_site", secret_site) as Dictionary).duplicate(true)
+
+
+## 把关卡设计源里的 Boss 中心点与两侧增援点落成可见、可探测的运行时 Marker3D。
+## 本房没有计划时一个节点都不创建，其他关卡行为不变。
+func _build_boss_reinforcement_markers() -> void:
+	var old_center := get_node_or_null("BossSpawnCenter")
+	if old_center != null:
+		old_center.free()
+	var old_rows := get_node_or_null("BossReinforcementSpawns")
+	if old_rows != null:
+		old_rows.free()
+	if boss_reinforcement_plan.is_empty() or not bool(boss_reinforcement_plan.get("enabled", false)):
+		return
+	var center_raw := boss_reinforcement_plan.get("boss_spawn_local_m", []) as Array
+	var boss_marker := Marker3D.new()
+	boss_marker.name = "BossSpawnCenter"
+	if center_raw.size() >= 2:
+		boss_marker.position = Vector3(float(center_raw[0]), 0.0, float(center_raw[1]))
+	add_child(boss_marker)
+	var rows_root := Node3D.new()
+	rows_root.name = "BossReinforcementSpawns"
+	add_child(rows_root)
+	for row_value in boss_reinforcement_plan.get("spawn_rows", []) as Array:
+		if not row_value is Dictionary:
+			continue
+		var row := row_value as Dictionary
+		var side := str(row.get("side", "row")).capitalize()
+		var x := float(row.get("x_m", 0.0))
+		var height := float(row.get("height_m", 3.0))
+		var z_values := row.get("z_m", []) as Array
+		for index in range(z_values.size()):
+			var marker := Marker3D.new()
+			marker.name = "%s_%02d" % [side, index + 1]
+			marker.position = Vector3(x, height, float(z_values[index]))
+			marker.set_meta("spawn_side", side.to_lower())
+			marker.set_meta("spawn_index", index)
+			rows_root.add_child(marker)
+
+
+func boss_spawn_position_world() -> Vector3:
+	var marker := get_node_or_null("BossSpawnCenter") as Marker3D
+	return marker.global_position if marker != null else global_position
+
+
+func boss_reinforcement_spawn_markers() -> Array[Marker3D]:
+	var result: Array[Marker3D] = []
+	var root := get_node_or_null("BossReinforcementSpawns")
+	if root == null:
+		return result
+	for child in root.get_children():
+		if child is Marker3D:
+			result.append(child as Marker3D)
+	return result
+
+
+func _ready() -> void:
+	_rng.seed = room_seed
+	if theme == null:
+		theme = PortStripEnvAssets.resource("res://assets/art/environments/dungeon_3d/env_iron_frontier_kit_top3d_v001.tres") as DungeonTheme3D
+	add_to_group("dungeon_room_3d")
+	_build_spawn_points()
+	if _expedition_static_layout_path().is_empty():
+		_build_connection_port_markers(self)
+	set_stream_state(0)
+
+
+func get_dimensions() -> Vector2:
+	if custom_dimensions.x > 0.0 and custom_dimensions.y > 0.0:
+		return custom_dimensions
+	return ROOM_DIMENSIONS.get(size_class, ROOM_DIMENSIONS["medium"])
+
+
+func is_room_light_on() -> bool:
+	for light_switch in _all_room_light_switches():
+		if light_switch != null and is_instance_valid(light_switch):
+			return light_switch.is_light_on()
+	return false
+
+
+## 统一控制房间灯光。FACILITY 的两个开关已通过 link_switch 并联，
+## 因此只从一个有效开关发起变更，避免重复播放启动表现；普通房间沿用单开关。
+## 该接口是剧情与房间灯光状态之间的稳定边界，也会同步 Art 自发光。
+func set_room_light_on(enabled: bool) -> bool:
+	var switches := _all_room_light_switches()
+	if switches.is_empty():
+		return false
+	var light_switch := switches[0]
+	if light_switch == null or not is_instance_valid(light_switch):
+		return false
+	return light_switch.set_light_on(enabled)
+
+
+## 仅供主线开场 2.5 使用：把灯光状态写进现有待恢复状态，
+## 保留同一份状态里的容器等其它字段，不提前构建 RuntimeDetail。
+func apply_narrative_light_state(enabled: bool) -> bool:
+	if not _pending_detail_runtime_state.is_empty():
+		_pending_detail_runtime_state["room_light_on"] = enabled
+	return set_room_light_on(enabled)
+
+
+## 返回供剧情相机使用的稳定灯光开关锚点，不暴露节点路径。
+## 新主线从 98F 东侧进入 99F，因此默认优先东侧开关。
+func get_narrative_light_switch_anchor(preferred_entry := "east") -> Variant:
+	var switches := _all_room_light_switches()
+	if switches.is_empty():
+		return null
+	var wanted_direction := "east" if preferred_entry != "west" else "west"
+	for light_switch in switches:
+		if str(light_switch.get_meta("facility_entry_direction", "")).begins_with(wanted_direction + "_"):
+			return {
+				"position": light_switch.get_interaction_dot_anchor(),
+				"room_id": room_id,
+				"side": wanted_direction,
+			}
+	var fallback := switches[0]
+	return {
+		"position": fallback.get_interaction_dot_anchor(),
+		"room_id": room_id,
+		"side": str(fallback.get_meta("facility_entry_direction", "")),
+	}
+
+
+func get_room_snapshot() -> Dictionary:
+	return {
+		"room_id": room_id, "room_type": room_type, "size_class": size_class,
+		"dimensions": get_dimensions(), "doors": doors.duplicate(), "visited": visited,
+		"cleared": cleared, "is_main_path": is_main_path,
+		"authored_layout_shell": authored_layout_shell,
+		"authored_layout_peaceful": authored_layout_peaceful,
+		"search_facilities_enabled": search_facilities_enabled,
+		"shell_built": _shell_built, "detail_built": _detail_built, "stream_state": _stream_state,
+		"stream_state_name": get_stream_state_name(),
+		"stream_transition_count": _stream_transition_count,
+		"furniture_count": get_tree().get_nodes_in_group("room_prop_3d").filter(func(node): return is_ancestor_of(node)).size(),
+		"light_count": get_tree().get_nodes_in_group("wasteland_light_3d").filter(func(node): return is_ancestor_of(node)).size(),
+		"central_light": _central_light != null,
+		"room_light_on": is_room_light_on(),
+		"light_switch": _light_switch != null,
+		"controlled_light_count": _room_lights.size(),
+		"shadow_capable_light_count": _count_shadow_capable_lights(),
+		"active_shadow_light_count": _count_active_shadow_lights(),
+		"room_light_cull_mask": GameDesignConfig.LIGHT_MASK_WORLD_AND_PLAYER,
+		"base_grid_dimensions": Vector2i(6, 6) if room_type == "FACILITY" else Vector2i.ZERO,
+		"base_grid_tile_count": 36 if room_type == "FACILITY" else 0,
+		"base_grid_tile_count_light": 18 if room_type == "FACILITY" else 0,
+		"base_grid_tile_count_dark": 18 if room_type == "FACILITY" else 0,
+		"base_grid_checkerboard_pattern": room_type == "FACILITY",
+		"base99_floor_plain_instance_count": _sum_int_meta_for_asset_floor(
+			self, "ENV-BASE99-FLOOR-PLAIN-5M", "instance_count", 99
+		),
+		"base99_floor_rivet_instance_count": _sum_int_meta_for_asset_floor(
+			self, "ENV-BASE99-FLOOR-RIVET-5M", "instance_count", 99
+		),
+		"tower_wall_module_count": (
+			_count_nodes_with_meta(self, "asset_id", "ENV-TOWER-WALL-SOLID-5M")
+			+ _count_nodes_with_meta_floor(
+				self, "asset_id", "ENV-BASE99-WALL-PLAIN-5X12", 99
+			)
+		),
+		"base99_wall_plain_module_count": _count_nodes_with_meta_floor(
+			self, "asset_id", "ENV-BASE99-WALL-PLAIN-5X12", 99
+		),
+		"base99_wall_plain_instance_count": _sum_int_meta_for_asset_floor(
+			self, "ENV-BASE99-WALL-PLAIN-5X12", "segment_count", 99
+		),
+		"base99_wall_window_instance_count": _sum_int_meta_for_asset_floor(
+			self, "ENV-BASE99-WALL-WINDOW-5X12", "segment_count", 99
+		),
+		"base99_wall_door_module_count": _count_nodes_with_meta_floor(
+			self, "asset_id", "ENV-BASE99-WALL-DOOR-5X12", 99
+		),
+		"base100_upper_shell_count": _count_nodes_with_meta(
+			self, "asset_id", "ENV-BASE100-UPPER-SHELL-30X30-H12"
+		),
+		"base100_wall_plain_instance_count": _sum_int_meta_for_asset_floor(
+			self, "ENV-BASE99-WALL-PLAIN-5X12", "segment_count", 100
+		),
+		"base100_wall_window_instance_count": _sum_int_meta_for_asset_floor(
+			self, "ENV-BASE99-WALL-WINDOW-5X12", "segment_count", 100
+		),
+		"base100_wall_door_instance_count": _sum_int_meta_for_asset_floor(
+			self, "ENV-BASE99-WALL-DOOR-5X12", "segment_count", 100
+		),
+		"base100_roof_tile_count": _sum_int_meta_for_asset(
+			self, "ENV-BASE100-UPPER-SHELL-30X30-H12", "roof_tile_count"
+		),
+		# 2026-09-20：东西南三面外墙与 24m 封顶改由天台参考组件库 v002 承接。
+		# 这三面墙不再计入 base100_wall_plain_instance_count（base99 plain 只剩北面 2 块），
+		# 所以必须单独计数，否则「墙确实换成 v002」这件事没有任何断言看得见。
+		"base100_rooftop_room_wall_count": _count_nodes_with_meta(
+			self, "asset_id", "ENV-ROOFTOP-REF-ROOM-WALL"
+		),
+		"base100_rooftop_roof_corner_count": _count_nodes_with_meta(
+			self, "asset_id", "ENV-ROOFTOP-REF-ROOF-CORNER"
+		),
+		"base100_rooftop_roof_edge_count": _count_nodes_with_meta(
+			self, "asset_id", "ENV-ROOFTOP-REF-ROOF-EDGE"
+		),
+		"base100_rooftop_roof_full_count": _count_nodes_with_meta(
+			self, "asset_id", "ENV-ROOFTOP-REF-ROOF-FULL"
+		),
+		"base100_structure_collision_count": _count_nodes_with_meta(
+			self, "base100_upper_shell_collision", true
+		),
+		"base99_door_lift_count": _count_nodes_with_meta(
+			self, "visual_asset_id", "ENV-BASE99-DOOR-LIFT-22X25"
+		),
+		"base99_mezzanine_count": _count_nodes_with_meta(
+			self, "asset_id", "ENV-BASE99-MEZZANINE-20X10-Z5"
+		),
+		"base99_stair_l_count": _count_nodes_with_meta(
+			self, "asset_id", "ENV-BASE99-STAIR-L-Z5"
+		),
+		"base99_stair_exterior_count": _count_nodes_with_meta(
+			self, "asset_id", "ENV-BASE99-STAIR-EXTERIOR-H4"
+		),
+		"base99_camera_stair_slab_count": _count_nodes_with_meta(
+			self, "camera_stair_slab", true
+		),
+		# 入口安全房 v007：墙体/门墙/地砖来自战局区块通用组件库 v004，
+		# 房间设施来自 17 个房间包。四组计数用于确认正式美术确实装配到位。
+		"safe_room_art_version": str(get_meta("safe_room_art_version", "")),
+		"safe_room_orientation_steps": int(get_meta("safe_room_orientation_steps", 0)),
+		"safe_room_wall_module_count": _count_nodes_with_meta(
+			self, "asset_id", "ENV-BATTLE-COMMON-WALL-STANDARD-5M"
+		),
+		"safe_room_door_wall_module_count": _count_nodes_with_meta(
+			self, "asset_id", "ENV-BATTLE-COMMON-WALL-DOOR-5M"
+		),
+		# 四角 L 型墙角（远征入口安全房专有）：live 计数按 asset_id 数节点，
+		# 不是读建造时自报的 meta —— 否则「声明了但一件没落地」看不出红。
+		"safe_room_corner_l": bool(get_meta("safe_room_corner_l", false)),
+		"safe_room_corner_module_count": _count_nodes_with_meta(
+			self, "asset_id", "ENV-TOWER-CORNER-L-5M"
+		),
+		"safe_room_wall_expected_count": int(get_meta("safe_room_wall_expected_count", -1)),
+		"safe_room_floor_tile_count": (
+			_count_nodes_with_meta(self, "asset_id", "ENV-BATTLE-COMMON-FLOOR-TILE-R01-C01")
+			+ _count_nodes_with_meta(self, "asset_id", "ENV-BATTLE-COMMON-FLOOR-TILE-R01-C02")
+		),
+		"safe_room_package_count": int(get_meta("safe_room_package_count", 0)),
+		"tower_door_wall_module_count": (
+			_count_nodes_with_meta(self, "asset_id", "ENV-TOWER-WALL-DOOR-5M")
+			+ _count_nodes_with_meta_floor(
+				self, "asset_id", "ENV-BASE99-WALL-DOOR-5X12", 99
+			)
+		),
+		"tower_corner_module_count": _count_nodes_with_meta(self, "asset_id", "ENV-TOWER-CORNER-L-5M"),
+		"wall_material_variant_a_count": _count_nodes_with_meta(self, "material_variant", "A"),
+		"wall_material_variant_b_count": _count_nodes_with_meta(self, "material_variant", "B"),
+		"tower_module_shell": tower_module_shell,
+		"open_wall_directions": open_wall_directions.duplicate(),
+		"wall_height": TOWER_GEOMETRY.FLOOR_HEIGHT_M if tower_module_shell else 2.8,
+		"support_collision_persistent": _has_enabled_support_collision(),
+		"service_station_count": _get_service_stations().size(),
+		"event_objective_ready": get_service_station("event") != null,
+		"door_snapshots": _get_door_snapshots(),
+		"is_3d": true,
+	}
+
+
+## 正式运行时 O(1) 读取。完整 get_room_snapshot() 会扫描节点组和递归统计
+## 组件，只允许验收/调试低频调用，禁止在 _process/_physics_process 中使用。
+func get_stream_state() -> int:
+	return _stream_state
+
+
+func is_streamed() -> bool:
+	return _stream_state in [STREAM_SHELL_READY, STREAM_ACTIVE, STREAM_PREFETCHING]
+
+
+func get_stream_state_name() -> String:
+	return str(STREAM_STATE_NAMES.get(_stream_state, "DATA_ONLY"))
+
+
+func ensure_detail_built() -> void:
+	if _detail_built:
+		return
+	_detail_built = true
+	_detail_root = Node3D.new()
+	_detail_root.name = "RuntimeDetail"
+	add_child(_detail_root)
+	_building_detail = true
+	_build_content()
+	_building_detail = false
+	_apply_pending_detail_runtime_state()
+	_set_room_light_runtime_state(self)
+
+
+func ensure_shell_built() -> void:
+	if _shell_built:
+		return
+	_shell_built = true
+	_build_shell()
+	_build_trigger()
+	# FACILITY（99F基地）的中央顶灯与墙面开关是壳体级常驻节点：
+	# 随壳体一次性建好，不走 RuntimeDetail 的进出重建「出现流程」。
+	_ensure_facility_permanent_lighting()
+	_keep_structural_physics_active(self)
+
+
+func set_stream_state(state: int) -> void:
+	var next_state := clampi(state, STREAM_DATA_ONLY, STREAM_HIBERNATING)
+	if next_state == _stream_state:
+		return
+	_stream_state = next_state
+	_stream_transition_count += 1
+	_last_stream_transition_msec = Time.get_ticks_msec()
+	var presentation_ready := _stream_state in [STREAM_SHELL_READY, STREAM_ACTIVE, STREAM_PREFETCHING]
+	if presentation_ready:
+		ensure_shell_built()
+		if _stream_state == STREAM_ACTIVE:
+			ensure_detail_built()
+		elif _stream_state == STREAM_PREFETCHING:
+			call_deferred("set_stream_state", STREAM_SHELL_READY)
+	elif _stream_state == STREAM_DATA_ONLY:
+		_unload_runtime_detail()
+	# 壳体永久可见，DATA_ONLY/HIBERNATING 只卸载或停用高成本运行时细节。
+	visible = true
+	process_mode = Node.PROCESS_MODE_INHERIT if presentation_ready else Node.PROCESS_MODE_DISABLED
+	# 墙、门框和楼板碰撞与视觉壳体保持一致，避免受光、通行和掉落规则分叉。
+	# RuntimeDetail 在 DATA_ONLY 中已被释放，因此不会保留家具/交互碰撞。
+	_set_collision_enabled(self, true, true)
+	if presentation_ready:
+		for value in _door_nodes.values():
+			var door := value as RoomDoor3D
+			if door != null:
+				door.set_open(door.is_open, true)
+	_set_room_light_runtime_state(self)
+
+
+func apply_runtime_detail_state(state: Dictionary) -> void:
+	_pending_detail_runtime_state = state.duplicate(true)
+	if _detail_built:
+		_apply_pending_detail_runtime_state()
+
+
+func _apply_pending_detail_runtime_state() -> void:
+	if _pending_detail_runtime_state.is_empty() or not _detail_built:
+		return
+		# 默认值必须跟着房间声明走：写死 false 会把「初始灯亮」在重建时顶掉。
+	var wanted_light_on := bool(
+		_pending_detail_runtime_state.get("room_light_on", authored_room_light_on)
+	)
+	if is_room_light_on() != wanted_light_on:
+		set_room_light_on(wanted_light_on)
+	var container_states := _pending_detail_runtime_state.get("containers", {}) as Dictionary
+	for value in get_tree().get_nodes_in_group("room_prop_3d"):
+		if value is RoomFurniture3D and _detail_root != null and _detail_root.is_ancestor_of(value):
+			var prop := value as RoomFurniture3D
+			if container_states.has(prop.prop_id):
+				prop.restore_searched_state(bool(container_states[prop.prop_id]))
+
+
+func _unload_runtime_detail() -> void:
+	if _detail_root != null and is_instance_valid(_detail_root):
+		remove_child(_detail_root)
+		_detail_root.queue_free()
+	_detail_root = null
+	_detail_built = false
+	# FACILITY 的顶灯与开关是壳体级常驻节点（不走出现流程），detail 卸载不回收；
+	# _room_lights 保留常驻灯登记，供阴影计数与快照读取。
+	if room_type != "FACILITY":
+		_central_light = null
+		_light_switch = null
+		_room_lights.clear()
+
+
+func _add_runtime_detail_child(node: Node) -> void:
+	if _building_detail and _detail_root != null:
+		_detail_root.add_child(node)
+	else:
+		add_child(node)
+
+
+## 99F基地（FACILITY）的中央顶灯与墙面开关不走 RuntimeDetail「出现流程」：
+## 随壳体一次性建好、常驻在场（业主 2026-09-21 指定）。
+## 进出房间只重建家具/可搜容器等细节；灯与开关不销毁、不换实例，
+## 开关状态连续性仍由 apply_runtime_detail_state("room_light_on") 兜底。
+## 美术灯控（Art 的设备青色发光）依赖 _install_facilities 装入的 Art 节点，
+## 其绑定时机保持在 detail 构建期（_bind_facility_presentation_light_control）。
+func _ensure_facility_permanent_lighting() -> void:
+	if room_type != "FACILITY" or size_class == "rooftop":
+		return
+	_prune_facility_switches()
+	var light_valid := _central_light != null and is_instance_valid(_central_light)
+	var switches_valid := _light_switches.size() == FACILITY_SWITCH_SIDES.size()
+	if light_valid and switches_valid:
+		return
+	if not light_valid:
+		_install_base99_facility_lights()
+		if _room_lights.is_empty():
+			# prefab 装入失败：不建开关（无受控灯的开关交互不成立），留待下次重试。
+			return
+	if not switches_valid:
+		_build_facility_light_switches()
+	elif not light_valid:
+		# 顶灯被重建过：常驻开关仍持有旧灯句柄，必须重新指向当前灯组，
+		# 否则开关会控制一个已释放的灯对象。
+		for light_switch in _light_switches:
+			light_switch.configure_group(_room_lights, true)
+		_bind_light_switch_signal()
+
+
+## 从 BASE99_MAIN_LIGHT_SCENE 装入 99F 基地常驻顶灯组。
+##
+## 数值（颜色/能量/范围/投影/闪烁/灯具外形）以 prefab 为唯一真源，本函数只做三件事：
+##   ① 实例化并按层高常量定挂位 —— 位置不写进 prefab，避免层高常量变更后静默错位；
+##   ② 把 prefab 内**所有** WastelandLight3D（含业主后加的子灯、子树任意深度）
+##      登记进 _room_lights，成对墙面开关的 configure_group(_room_lights) 即可
+##      统一控制整组灯（开关只认 WastelandLight3D，故收集按类型而非节点名）；
+##   ③ 加组、以关闭态起步，随后由开关的 4.5s 分段启动序列点亮。
+##
+## 99F基地只保留这一组中央玩法顶灯：Compatibility 默认每个 Mesh 最多接收 8 盏
+## OmniLight；28m 范围覆盖 30×30m 主体区。基地用接近中性的冷白主光保留真实色盘，
+## 青色由设备发光承担 —— 两者现均写在 prefab 里。
+func _install_base99_facility_lights() -> void:
+	var light_root := BASE99_MAIN_LIGHT_SCENE.instantiate() as Node3D
+	if light_root == null:
+		push_error(
+			"99F基地主灯 Prefab 实例化失败：%s" % BASE99_MAIN_LIGHT_SCENE.resource_path
+		)
+		return
+	light_root.name = "FacilityCeilingLight_Main"
+	if light_root is WastelandLight3D:
+		_central_light = light_root
+	light_root.position = Vector3.ZERO
+	if tower_module_shell:
+		# 灯具自身顶装高度 2.72m；整体抬升后与 12m 层高贴合（顶灯世界高度 11.62m）。
+		light_root.position.y = TOWER_GEOMETRY.FLOOR_HEIGHT_M - 2.72
+	var lights := _collect_wasteland_lights(light_root)
+	if lights.is_empty():
+		push_error(
+			"99F基地主灯 Prefab 内没有任何 WastelandLight3D：%s"
+			% BASE99_MAIN_LIGHT_SCENE.resource_path
+		)
+		light_root.queue_free()
+		return
+	# 入树前先落关闭态：子灯的 _ready 会按 light_enabled 建灯，避免先亮一帧。
+	for light in lights:
+		light.set_light_enabled(false)
+	# 壳体期不在 detail 构建流程中，_add_runtime_detail_child 兜底直挂房间根。
+	_add_runtime_detail_child(light_root)
+	for light in lights:
+		light.set_light_enabled(false)
+		if not light.is_in_group("wasteland_light_3d"):
+			light.add_to_group("wasteland_light_3d")
+		# 常驻灯登记，供开关控制、阴影计数与快照读取。
+		if not _room_lights.has(light):
+			_room_lights.append(light)
+
+
+## 收集节点自身与全部后代里的 WastelandLight3D（前序、树上顺序稳定）。
+func _collect_wasteland_lights(root: Node) -> Array[WastelandLight3D]:
+	var found: Array[WastelandLight3D] = []
+	if root is WastelandLight3D:
+		found.append(root)
+	for child in root.get_children():
+		found.append_array(_collect_wasteland_lights(child))
+	return found
+
+
+## 认领静态布局里的房间灯与墙面开关 —— 房间「设备真源」的落点。
+##
+## 静态布局 TSCN（`AuthoredLayoutArtRoot` / `SafeRoomArtRoot`）下的 `WastelandLight3D`
+## 与 `RoomLightSwitch3D` 由场景文件直接持有：位置与数值（颜色 / 能量 / 范围 / 投影 /
+## 灯具类型）都能在编辑器里手动调整，且随壳体常驻、不进 `RuntimeDetail` 的进出重建流程。
+## 认领成功时**不再**由 `_create_room_light()` / `LIGHT_SWITCH_SCENE` 另建一份。
+##
+## 返回 true 表示本房的房间灯已改由静态布局持有；返回 false 时调用方逐字走原路径
+## （程序化房、塔楼房、以及尚未迁移的旧静态布局）。
+func _adopt_authored_room_devices() -> bool:
+	var static_root := _authored_static_layout_root()
+	if static_root == null:
+		return false
+	var lights := _collect_wasteland_lights(static_root)
+	if lights.is_empty():
+		return false
+	_room_lights.clear()
+	for light in lights:
+		_room_lights.append(light)
+	# 第一盏即中央顶灯：与 `_create_room_light()` 的 `_central_light` 同口径
+	# （大竞技场的四区灯同样取第一盏，用来做阴影计数与快照）。
+	_central_light = lights[0]
+	var switches := _collect_room_light_switches(static_root)
+	_light_switch = switches[0] if not switches.is_empty() else null
+	set_meta("authored_room_devices", true)
+	set_meta("authored_room_light_count", lights.size())
+	return true
+
+
+## 静态布局根。远征 13 房 = `AuthoredLayoutArtRoot`；入口安全房 = `SafeRoomArtRoot`。
+func _authored_static_layout_root() -> Node3D:
+	for candidate in ["AuthoredLayoutArtRoot", "SafeRoomArtRoot"]:
+		var node := get_node_or_null(candidate) as Node3D
+		if node != null:
+			return node
+	return null
+
+
+## 在**尚未 rename、尚未入树**的静态布局实例里按「根优先、命中即止」找一条房间级 meta。
+##
+## 用途：`f00_boss_room_02_static_layout.tscn` 这类**共享房**被各关卡用薄绑定壳实例化
+## （99 的绑定壳只是 `[node name="BossRoom02" instance=...]`）。房间级声明写在共享房根上
+## 时，只读绑定壳根会漏掉 —— 同一张房图在不同关卡里就会表现不一致。
+## 找到返回原值（可能是 `false`，所以**不能**用 `false` 当「没找到」），没找到返回 `null`。
+func _find_static_layout_meta(node: Node, key: String) -> Variant:
+	if node.has_meta(key):
+		return node.get_meta(key)
+	for child in node.get_children():
+		var found: Variant = _find_static_layout_meta(child, key)
+		if found != null:
+			return found
+	return null
+
+
+## 收集节点自身与全部后代里的墙面灯开关（前序、顺序稳定）。
+func _collect_room_light_switches(root: Node) -> Array[RoomLightSwitch3D]:
+	var found: Array[RoomLightSwitch3D] = []
+	if root is RoomLightSwitch3D:
+		found.append(root)
+	for child in root.get_children():
+		found.append_array(_collect_room_light_switches(child))
+	return found
+
+
+## 常亮房：把本房所有已认领的墙面开关摘掉并清空登记，且**不**再自建。
+##
+## 与 `_build_facility_light_switches()` 的差别：那个是「重建」，这个是「废止」——
+## 静态布局自持的开关节点随壳体常驻，`queue_free()` 才是真的让它从场景消失；
+## 只把 `_light_switch` 置空会在下一帧被 `_adopt_authored_room_devices()` 重新认领回来。
+func _release_light_switches() -> void:
+	var released := 0
+	for light_switch in _all_room_light_switches():
+		if light_switch != null and is_instance_valid(light_switch):
+			light_switch.queue_free()
+			released += 1
+	_light_switches.clear()
+	_light_switch = null
+	if released > 0:
+		print("[DungeonRoom3D] %s 常亮房：摘除 %d 个墙面开关" % [room_id, released])
+
+
+## 建齐基地成对开关（西墙→100F、东墙→98F），全部直挂房间根、不走出现流程。
+## 两个开关共享同一组受控灯，并以 link_switch 互相并联（启动序列互锁 +
+## 指示灯/提示文字同步），避免同一盏灯上出现两个各自为政的开关。
+func _build_facility_light_switches() -> void:
+	for existing in _light_switches:
+		if existing != null and is_instance_valid(existing):
+			existing.queue_free()
+	_light_switches.clear()
+	for side in FACILITY_SWITCH_SIDES:
+		var light_switch := LIGHT_SWITCH_SCENE.instantiate() as RoomLightSwitch3D
+		if light_switch == null:
+			push_error("基地墙面灯开关 Prefab 实例化失败：%s" % side)
+			continue
+		light_switch.name = (
+			"RoomLightSwitch3D" if side == "west" else "RoomLightSwitch3D_East"
+		)
+		_place_facility_light_switch(light_switch, get_dimensions(), side)
+		light_switch.configure_group(_room_lights, true)
+		add_child(light_switch)
+		_light_switches.append(light_switch)
+	for index in range(_light_switches.size()):
+		for other_index in range(index + 1, _light_switches.size()):
+			_light_switches[index].link_switch(_light_switches[other_index])
+	_light_switch = _light_switches[0] if not _light_switches.is_empty() else null
+	_bind_light_switch_signal()
+	_bind_facility_presentation_light_control(true)
+
+
+func _prune_facility_switches() -> void:
+	for index in range(_light_switches.size() - 1, -1, -1):
+		var light_switch := _light_switches[index]
+		if light_switch == null or not is_instance_valid(light_switch):
+			_light_switches.remove_at(index)
+
+
+## 基地开关落位：贴门洞一侧的第一个 5m 墙段，从门洞边缘再向外取 1/3 网格。
+## west 取门洞北侧段、east 取门洞南侧段 ⇒ 两侧关于房间中心镜像、离门距离相同。
+## 朝向沿用通用落位口径：local −Z（面板正面）朝房间内。
+func _place_facility_light_switch(
+	light_switch: RoomLightSwitch3D, dimensions: Vector2, side: String
+) -> void:
+	var wall_unit := TOWER_GEOMETRY.GRID_UNIT_M
+	var door := get_door_node(side)
+	# 门缺失时退回「墙中心段」的同一口径，保证仍落在合法墙段内。
+	var door_along := door.position.z if door != null else -wall_unit * 0.5
+	var half_unit := wall_unit * 0.5
+	var third_unit := wall_unit / 3.0
+	if side == "east":
+		light_switch.position = Vector3(
+			dimensions.x * 0.5 - FACILITY_SWITCH_WALL_INSET_M,
+			0.0,
+			door_along + half_unit + third_unit
+		)
+		light_switch.rotation.y = PI * 0.5
+		light_switch.set_meta("facility_entry_switch_clearance_m", half_unit)
+		light_switch.set_meta("facility_entry_direction", "east_entry_south_first_wall")
+		return
+	light_switch.position = Vector3(
+		-dimensions.x * 0.5 + FACILITY_SWITCH_WALL_INSET_M,
+		0.0,
+		door_along - half_unit - third_unit
+	)
+	light_switch.rotation.y = -PI * 0.5
+	light_switch.set_meta("facility_entry_switch_clearance_m", half_unit)
+	light_switch.set_meta("facility_entry_direction", "west_entry_north_first_wall")
+
+
+func bind_base_power_presentation() -> void:
+	_bind_facility_presentation_light_control(_facility_lights_currently_on())
+
+
+func _bind_facility_presentation_light_control(starts_on: bool) -> void:
+	if room_type != "FACILITY":
+		return
+	for light_switch in _all_room_light_switches():
+		light_switch.bind_base_power()
+	var art_layout := get_node_or_null("Art")
+	if art_layout == null or not art_layout.has_method("set_presentation_lighting_enabled"):
+		return
+	# 成对开关都要能播完整启动序列，也都要能把关灯状态转给美术自发光；
+	# set_presentation_lighting_enabled 幂等，重复连接同一 Callable 由判重挡住。
+	var presentation_callback := Callable(
+		art_layout, "set_presentation_lighting_enabled"
+	)
+	for light_switch in _all_room_light_switches():
+		if not light_switch.light_toggled.is_connected(presentation_callback):
+			light_switch.light_toggled.connect(presentation_callback)
+		# 总启动时长约五秒；第4.5秒中央顶灯先亮，剩余小灯继续完成启动。
+		light_switch.configure_turn_on_presentation(art_layout, 5.0)
+	art_layout.call("set_presentation_lighting_enabled", starts_on)
+	for light_switch in _all_room_light_switches():
+		light_switch.bind_base_power()
+
+
+## 成对常驻开关「此刻是否点着灯」，供 detail 重建时把美术表现恢复到开关的当前状态
+## （不能写死 true）。开关尚未建好、或开关没有受控灯时返回 true，
+## 保持既有「detail 重建默认点亮」的行为。
+func _facility_lights_currently_on() -> bool:
+	for light_switch in _all_room_light_switches():
+		if int(light_switch.get_snapshot().get("controlled_light_count", 0)) == 0:
+			continue
+		return light_switch.is_light_on()
+	return true
+
+
+## 本房全部墙面开关。FACILITY 返回成对常驻开关；其他房型沿用单开关。
+func _all_room_light_switches() -> Array[RoomLightSwitch3D]:
+	var result: Array[RoomLightSwitch3D] = []
+	if room_type == "FACILITY":
+		_prune_facility_switches()
+		for light_switch in _light_switches:
+			result.append(light_switch)
+		return result
+	if _light_switch != null and is_instance_valid(_light_switch):
+		result.append(_light_switch)
+	return result
+
+
+
+## 通用灯开关订阅（不限 FACILITY 房）。非基地房型的开关是 RuntimeDetail 子节点，
+## 进出房间会重建；基地开关是壳体级常驻（见 _ensure_facility_permanent_lighting）。
+## 两种情况都走本函数订阅，且对成对开关逐一订阅。
+func _bind_light_switch_signal() -> void:
+	for light_switch in _all_room_light_switches():
+		if not light_switch.light_toggled.is_connected(_on_light_switch_toggled):
+			light_switch.light_toggled.connect(_on_light_switch_toggled)
+
+
+func _on_light_switch_toggled(is_on: bool) -> void:
+	light_toggled.emit(self, is_on)
+
+
+func _set_room_light_runtime_state(root: Node) -> void:
+	for child in root.get_children():
+		if child is WastelandLight3D:
+			(child as WastelandLight3D).set_runtime_active(
+				_stream_state in [STREAM_SHELL_READY, STREAM_ACTIVE],
+				_stream_state == STREAM_ACTIVE,
+				_stream_state == STREAM_ACTIVE
+			)
+		else:
+			_set_room_light_runtime_state(child)
+
+
+func set_door_open(direction: String, opened: bool, immediate := false) -> void:
+	if not _shell_built and _stream_state > 0:
+		ensure_shell_built()
+	var door := _door_nodes.get(direction) as RoomDoor3D
+	if door != null:
+		door.set_open(opened, immediate)
+
+
+func contains_world_position(
+	world_position: Vector3,
+	min_local_y := ROOM_OWNERSHIP_MIN_LOCAL_Y_M,
+	max_local_y := ROOM_OWNERSHIP_MAX_LOCAL_Y_M
+) -> bool:
+	var local_position := to_local(world_position) if is_inside_tree() else world_position - position
+	var dimensions := get_dimensions()
+	var half_x := maxf(0.0, dimensions.x * 0.5 - ROOM_OWNERSHIP_BOUNDARY_INSET_M)
+	var half_z := maxf(0.0, dimensions.y * 0.5 - ROOM_OWNERSHIP_BOUNDARY_INSET_M)
+	if absf(local_position.x) >= half_x or absf(local_position.z) >= half_z:
+		return false
+	var walk_polygons := get_meta("walkable_navigation_polygons", []) as Array
+	if not walk_polygons.is_empty() and min_local_y == ROOM_OWNERSHIP_MIN_LOCAL_Y_M and max_local_y == ROOM_OWNERSHIP_MAX_LOCAL_Y_M:
+		return _inside_authored_walk_volume(local_position, walk_polygons)
+	if (
+		not (absf(local_position.x) < half_x and absf(local_position.z) < half_z)
+		or local_position.y < min_local_y
+		or local_position.y > max_local_y
+	):
+		return false
+	# 非矩形房：包围盒矩形会连凹口一起判成「房内」，而凹口是房外。额外要求点落在
+	# 某个**真砖格**上。没有地砖清单的房（矩形房 / 程序化房 / v007 安全房）跳过本判据。
+	return _inside_authored_footprint(local_position)
+
+
+## Multi-height authored rooms own their actual walk surfaces, including ramps.
+## The empty shaft is excluded, and ordinary tile-based rooms keep their contract.
+func _inside_authored_walk_volume(local_position: Vector3, polygons: Array) -> bool:
+	for polygon_value in polygons:
+		var polygon := polygon_value as Array
+		if polygon.size() < 3:
+			continue
+		var footprint := PackedVector2Array()
+		var vertices := PackedVector3Array()
+		for point_value in polygon:
+			var point := point_value as Array
+			vertices.append(Vector3(float(point[0]), float(point[1]), float(point[2])))
+			footprint.append(Vector2(float(point[0]), float(point[2])))
+		if not Geometry2D.is_point_in_polygon(Vector2(local_position.x, local_position.z), footprint):
+			continue
+		var normal := (vertices[1] - vertices[0]).cross(vertices[2] - vertices[0])
+		if absf(normal.y) < 0.001:
+			continue
+		var walk_y := vertices[0].y - (normal.x * (local_position.x - vertices[0].x) + normal.z * (local_position.z - vertices[0].z)) / normal.y
+		if local_position.y >= walk_y + ROOM_OWNERSHIP_MIN_LOCAL_Y_M and local_position.y <= walk_y + ROOM_OWNERSHIP_MAX_LOCAL_Y_M:
+			return true
+	return false
+
+
+## 非矩形房的「真在房内」判据：点必须落在某个已铺地砖的 5m 格内（凹口没有砖）。
+## 没有地砖清单时恒真 —— 旧行为逐字不变。
+func _inside_authored_footprint(local_position: Vector3) -> bool:
+	if _authored_tile_cells.is_empty():
+		return true
+	for cell in _authored_tile_cells:
+		if (
+			absf(local_position.x - cell.x) <= AUTHORED_TILE_HALF_M + AUTHORED_TILE_HIT_TOLERANCE_M
+			and absf(local_position.z - cell.z) <= AUTHORED_TILE_HALF_M + AUTHORED_TILE_HIT_TOLERANCE_M
+		):
+			return true
+	return false
+
+
+func get_nearest_door(player_position: Vector3, max_distance := 3.4) -> Dictionary:
+	var nearest_distance := max_distance
+	var nearest: RoomDoor3D = null
+	var nearest_direction := ""
+	for direction_value in _door_nodes.keys():
+		var direction := str(direction_value)
+		var value: Variant = _door_nodes[direction_value]
+		var door := value as RoomDoor3D
+		if door == null:
+			continue
+		var distance := player_position.distance_to(door.global_position)
+		if distance < nearest_distance:
+			nearest_distance = distance
+			nearest = door
+			nearest_direction = direction
+	if nearest == null:
+		return {}
+	return {
+		"direction": nearest_direction,
+		"target_room_id": str(door_targets.get(nearest_direction, nearest.target_room_id)),
+		"is_open": nearest.is_open,
+		"distance": nearest_distance,
+		"door": nearest,
+	}
+
+
+func hide_door_prompts() -> void:
+	for value in _door_nodes.values():
+		var door := value as RoomDoor3D
+		if door != null:
+			door.set_prompt_visible(false)
+
+
+func get_door_node(direction: String) -> RoomDoor3D:
+	return _door_nodes.get(direction) as RoomDoor3D
+
+
+func owns_door_endpoint(direction: String) -> bool:
+	return true if not door_endpoint_owners.has(direction) else bool(door_endpoint_owners[direction])
+
+
+func bind_shared_door(direction: String, door: RoomDoor3D) -> void:
+	if direction.is_empty() or door == null:
+		return
+	_door_nodes[direction] = door
+
+
+func get_connection_port_towards(target_room_id: String) -> Dictionary:
+	for value in connection_ports:
+		var port := value as Dictionary
+		if str(port.get("target_room_id", "")) == target_room_id:
+			return port
+	return {}
+
+
+func _build_connection_port_markers(parent: Node3D) -> void:
+	if parent == null or connection_ports.is_empty():
+		return
+	var container := Node3D.new()
+	container.name = "ConnectionPorts"
+	container.set_meta("connection_port_count", connection_ports.size())
+	parent.add_child(container)
+	# 端口声明永远使用房间坐标。静态美术根可能带有烘焙/对齐变换，
+	# 所以把容器转回房间坐标，避免 marker 再被父 root 重复旋转。
+	if parent != self:
+		container.transform = parent.transform.affine_inverse()
+	for value in connection_ports:
+		var port := value as Dictionary
+		var port_id := str(port.get("port_id", ""))
+		var raw_position := port.get("position_m", []) as Array
+		var raw_outward := port.get("outward", []) as Array
+		if port_id.is_empty() or raw_position.size() < 2 or raw_outward.size() < 2:
+			continue
+		var marker := Marker3D.new()
+		marker.name = "Port_%s" % port_id
+		var position := Vector2(float(raw_position[0]), float(raw_position[1]))
+		marker.position = Vector3(position.x, 0.0, position.y)
+		var outward := Vector2(float(raw_outward[0]), float(raw_outward[1])).normalized()
+		# Marker3D 的局部 +Z 统一指向房间外侧。
+		marker.rotation.y = atan2(outward.x, outward.y)
+		marker.set_meta("port_id", port_id)
+		marker.set_meta("position_m", position)
+		marker.set_meta("target_room_id", str(port.get("target_room_id", "")))
+		marker.set_meta("side", str(port.get("side", "")))
+		marker.set_meta("lane_m", float(port.get("lane_m", 0.0)))
+		marker.set_meta("outward", outward)
+		marker.set_meta("connected", not str(port.get("target_room_id", "")).is_empty())
+		container.add_child(marker)
+
+
+## 预烘焙静态场景里的端口 Marker 是否与本局端口声明对不上。
+## 比对口径：Marker 数量、每个 `port_id` 是否存在、`target_room_id` 是否一致、
+## **Marker 所表达的房间坐标与当前端口坐标是否重合**。
+##
+## 最后一条是必需的：房间节点自身的 `rotation` 恒为 0（朝向由端口坐标与实例清单
+## 表达，不靠节点 transform），所以「本局 rotation 变了」在静态场景里**毫无痕迹** ——
+## 壳体的门洞还留在烘焙时那面墙上，运行时按本局门位打射线就会打空
+## （实测：漏掉这条坐标比对时，`verify_expedition_level01_flow` 的轮廓感知判据
+## 从基线 2 条错涨到几十条「那面墙没有碰撞体，且不是门洞」）。
+## 随机拼接会重排开口角色与朝向，因此这条比对是「过期」的主要判据。
+## —— 预烘焙静态场景与本局几何对齐 ——
+##
+## 静态场景是**刚体**：房间是那间房、墙是那面墙、地砖装饰灯一件不少。随机拼接只改了它
+## 在版图上的落点与朝向，所以对齐只需要刚体级的几步：
+##
+##   ① **朝向**：场景实例按烘焙朝向固化（房间节点自身 `rot_y` 恒为 0），故整体绕 Y 转 Δ，
+##      内部相对关系分毫不动。Δ 由几何匹配定序（见 `_static_layout_alignment_delta_deg`）。
+##   ② **门位归属**：与父房共享的那一扇门由**父端**提供墙与门扇，本端烘焙时不生成
+##      （代码里的 `owns_door_endpoint` 取舍）。交换出入口后「共享侧」与「自持侧」
+##      互换 ⇒ 把那件门墙件搬回本局自持侧。不搬的后果是双向的：新自持侧缺一段墙
+##      （可从房里走出去）、原自持侧多一道假门。
+##   ③ **废门洞**：门墙件落在本局**没有门**的侧上 ⇒ 补一段同侧实墙（`_seal_stray_door_walls`）。
+func _align_static_layout_to_room(static_layout: Node3D) -> void:
+	var delta := _static_layout_alignment_delta_deg(static_layout)
+	if not is_zero_approx(delta):
+		static_layout.transform = (
+			Transform3D(Basis(Vector3.UP, deg_to_rad(delta)), Vector3.ZERO)
+			* static_layout.transform
+		)
+		if static_layout.has_meta("safe_room_orientation_steps"):
+			var steps := posmod(
+				int(static_layout.get_meta("safe_room_orientation_steps")) + int(round(delta / 90.0)),
+				4
+			)
+			static_layout.set_meta("safe_room_orientation_steps", steps)
+			static_layout.set_meta("room_orientation_steps", steps)
+		# 没有几何清单的房间（授权端口锚定房）整体转向后，**声明在美术帧里的导航多边形
+		# 必须同步转**：`contains_world_position()` 的房间归属判定与 NavigationMesh 都读它，
+		# 停在旧方位会让「站在平台上的玩家被判成不在本房」，进而影响进房/清房/镜头。
+		# 有清单的房间不走这一支（它们的多边形本来就按房间帧产出）。
+		if authored_layout_instances.is_empty() and static_layout.has_meta("walkable_navigation_polygons"):
+			static_layout.set_meta(
+				"walkable_navigation_polygons",
+				_rotate_walk_polygons(
+					static_layout.get_meta("walkable_navigation_polygons"), delta
+				)
+			)
+	_rehome_static_layout_door(static_layout)
+	_seal_stray_door_walls(static_layout)
+	_clear_connection_port_walls(static_layout)
+	for child in static_layout.get_children():
+		var module := child as Node3D
+		if module != null:
+			_apply_authored_room_type_wall_door_collision(
+				module, get_dimensions() * 0.5, static_layout.transform * module.transform
+			)
+	_sync_static_layout_connection_ports(static_layout)
+
+
+## 把 `walkable_navigation_polygons`（美术帧的 `[[x,y,z], …]` 多边形表）整体绕 Y 旋转。
+## 只转 x/z，y 不动；旋转方向与 `_rotate_port_vector` 同源（绕 +Y，右手系）。
+func _rotate_walk_polygons(polygons: Variant, delta_deg: float) -> Array:
+	var result: Array = []
+	if not (polygons is Array):
+		return result
+	var steps := posmod(int(round(delta_deg / 90.0)), 4)
+	for polygon_value in polygons as Array:
+		var rotated_polygon: Array = []
+		for point_value in polygon_value as Array:
+			if not (point_value is Array):
+				continue
+			var point := point_value as Array
+			if point.size() < 3:
+				continue
+			var x := float(point[0])
+			var z := float(point[2])
+			for _step in range(steps):
+				var next_x := z
+				z = -x
+				x = next_x
+			rotated_polygon.append([x, float(point[1]), z])
+		result.append(rotated_polygon)
+	return result
+
+
+## 把场景坐标转成本局坐标所需的 Y 轴旋转（度，90 的整数倍）。
+##
+## 口径：**几何匹配优先** —— 把场景里每件组件的位置按候选朝向转进房间帧，数清
+## `authored_layout_instances` 里有多少条能落在 `STATIC_LAYOUT_ALIGN_TOLERANCE_M` 内，
+## 取命中最多者；并列时才回落到老口径（`_static_layout_name_vote_deg`）。
+##
+## 为什么不能只认名字（老口径就栽在这里）：房型默认布局的实例名是**序号式**
+## （`wall_east_0`，与落点无关）⇒ 名字配得上；但具体房间差异布局与通用壳体的名字里
+## **编码了烘焙时的世界坐标**（`WALL_west_xm150_p87_5`），换一局落点就一个都对不上
+## ⇒ 投票为空 ⇒ 返回 0 ⇒ 整间房的墙停在烘焙朝向。实测这会让 room_07 少 2 段墙
+## （南侧两只 L 角），而且是**静默**的：名字投票算不出分歧，看起来像「不需要转」。
+##
+## 一个实例都配不上时返回 0（保守：不转），宁可维持烘焙朝向也不瞎转。
+func _static_layout_alignment_delta_deg(static_layout: Node3D) -> float:
+	# 安全屋没有实例清单；元数据记的是历史方位，实体门槽才是当前事实。
+	if authored_layout_instances.is_empty() and static_layout.has_meta("safe_room_orientation_steps"):
+		return _static_layout_door_alignment_delta_deg(static_layout)
+	var scene_points := _static_layout_planar_points(static_layout)
+	var checklist_points := _checklist_planar_points()
+	if scene_points.is_empty() or checklist_points.is_empty():
+		# 🔴 没有几何清单（**授权端口锚定房**：Boss 房深井 / 撤离房，`anchor_policy =
+		# static_port_layout` 会在生成器里整体跳过 `authored_layout_instances`）⇒ 几何配准
+		# 无从谈起。但**本局朝向是已知的**：`template_rotation_deg` 由生成器按端口配对现算
+		# （子口必须与父口反向），已随房表下发。
+		#
+		# 为什么必须用它而不能保守返回 0：美术是**按烘焙帧**保存的固定几何，而端口帧
+		# 随上游链每局可变 —— 实测远征01 同一关 5 个种子里就有 1 个算出 180°
+		# （端口从南翻到北）。不转回来的后果是「门开在实墙上」：玩家在门口走不进去，
+		# 而轮廓判据只会报「那面墙没有碰撞体」。这与有清单时几何配准得到的量同源。
+		#
+		# 旋转量为 0 时逐字维持原行为（塔楼 / 99 等朝向恒 0 的关卡一个字节都不变）。
+		var room_rotation := fposmod(float(get_meta("template_rotation_deg", 0.0)), 360.0)
+		return room_rotation if absf(room_rotation) > 0.5 else 0.0
+	var best_delta := 0.0
+	var best_score := -1
+	var tied: Array[float] = []
+	for steps in range(4):
+		var candidate := float(steps * 90)
+		var score := _planar_match_score(scene_points, checklist_points, candidate)
+		if score > best_score:
+			best_score = score
+			best_delta = candidate
+			tied = [candidate] as Array[float]
+		elif score == best_score:
+			tied.append(candidate)
+	if tied.size() > 1:
+		var voted := fposmod(_static_layout_name_vote_deg(static_layout), 360.0)
+		for candidate in tied:
+			if absf(candidate - voted) < 0.5:
+				return candidate
+	return best_delta
+
+
+## 无清单安全屋按实体门墙匹配，不能使用烘焙 Marker 的局部位置或历史方向元数据。
+## 同时验证门槽位置与朝外法线，四个候选中只有唯一完整匹配才允许转动。
+func _static_layout_door_alignment_delta_deg(static_layout: Node3D) -> float:
+	var scene_slots: Array[Transform3D] = []
+	for child in static_layout.get_children():
+		var piece := child as Node3D
+		if piece != null and _is_door_wall_piece(piece):
+			scene_slots.append(static_layout.transform * piece.transform)
+	var expected_slots: Array[Dictionary] = []
+	if not connection_ports.is_empty():
+		for value in connection_ports:
+			var port := value as Dictionary
+			var raw_position := port.get("position_m", []) as Array
+			var raw_outward := port.get("outward", []) as Array
+			if raw_position.size() < 2 or raw_outward.size() < 2:
+				return 0.0
+			var position := Vector3(float(raw_position[0]), 0.0, float(raw_position[1]))
+			var outward := Vector3(float(raw_outward[0]), 0.0, float(raw_outward[1]))
+			if outward.is_zero_approx():
+				return 0.0
+			expected_slots.append({"position": position, "outward": outward.normalized()})
+	else:
+		var half := get_dimensions() * 0.5
+		for direction in doors:
+			var outward := Vector3.ZERO
+			var position := Vector3.ZERO
+			var offset := float(get_meta("tower_wall_door_offset_%s" % direction, 0.0))
+			match direction:
+				"north":
+					outward = Vector3(0.0, 0.0, -1.0)
+					position = Vector3(offset, 0.0, -half.y)
+				"south":
+					outward = Vector3(0.0, 0.0, 1.0)
+					position = Vector3(offset, 0.0, half.y)
+				"east":
+					outward = Vector3(1.0, 0.0, 0.0)
+					position = Vector3(half.x, 0.0, offset)
+				"west":
+					outward = Vector3(-1.0, 0.0, 0.0)
+					position = Vector3(-half.x, 0.0, offset)
+				_:
+					return 0.0
+			expected_slots.append({"position": position, "outward": outward})
+	if scene_slots.is_empty() or scene_slots.size() != expected_slots.size():
+		return 0.0
+	var matching: Array[float] = []
+	for steps in range(4):
+		var delta := float(steps * 90)
+		var basis := Basis(Vector3.UP, deg_to_rad(delta))
+		var matched: Array[int] = []
+		var sides: Array[String] = []
+		for slot in scene_slots:
+			var position := basis * slot.origin
+			var outward := (basis * slot.basis.z).normalized()
+			# 门墙正反面均可入库；以房间中心判朝外符号，不信任旧 side 元数据。
+			if outward.dot(position) < 0.0:
+				outward = -outward
+			var side := _authored_wall_side_from_position(position, get_dimensions() * 0.5)
+			if side.is_empty():
+				break
+			sides.append(side)
+			for index in range(expected_slots.size()):
+				if index in matched:
+					continue
+				var expected := expected_slots[index]
+				var wanted := expected["position"] as Vector3
+				if (
+					Vector2(position.x, position.z).distance_to(Vector2(wanted.x, wanted.z))
+					<= DOOR_LANE_GUARD_TOLERANCE_M
+					and outward.dot(expected["outward"] as Vector3) > 0.99
+				):
+					matched.append(index)
+					break
+		if matched.size() == expected_slots.size() and _same_direction_set(sides, doors):
+			matching.append(delta)
+	return matching[0] if matching.size() == 1 else 0.0
+
+
+## 场景里**真组件**实例的水平坐标。灯 / 开关 / 相机代理是脚本节点，`scene_file_path`
+## 为空，天然被排除；剩下那批正是会跟着房间朝向走的美术件。
+func _static_layout_planar_points(static_layout: Node3D) -> Array[Vector2]:
+	var points: Array[Vector2] = []
+	for child in static_layout.get_children():
+		if not (child is Node3D):
+			continue
+		var node := child as Node3D
+		if node.scene_file_path.is_empty():
+			continue
+		var position := static_layout.transform * node.position
+		points.append(Vector2(position.x, position.z))
+	return points
+
+
+## 生成器清单里每个实例的水平坐标 —— 本局几何的唯一口径（地砖 / 墙 / L 角 / 陈设全在内；
+## 陈设的**不对称性**正是把 0° 与 180° 分开的依据）。
+func _checklist_planar_points() -> Array[Vector2]:
+	var points: Array[Vector2] = []
+	for value in authored_layout_instances:
+		var instance := value as Dictionary
+		var position := instance.get("position", Vector3.ZERO) as Vector3
+		points.append(Vector2(position.x, position.z))
+	return points
+
+
+## 场景点按候选朝向转进房间帧后，落在清单点容差内的条数。
+func _planar_match_score(
+	scene_points: Array[Vector2], checklist_points: Array[Vector2], delta_deg: float
+) -> int:
+	# 用 Godot 自己的 Basis，不要手写 (x,z) 平面的旋转：Y 轴旋转在 (x,z) 上的符号与
+	# `Vector2.rotated()` **相反**，手写极容易把 ±90° 判反（实测 room_04 / room_08
+	# 会因此选中差 180° 的朝向）。
+	var basis := Basis(Vector3.UP, deg_to_rad(delta_deg))
+	var rotated: Array[Vector2] = []
+	for point in scene_points:
+		var moved := basis * Vector3(point.x, 0.0, point.y)
+		rotated.append(Vector2(moved.x, moved.z))
+	var matched := 0
+	for wanted in checklist_points:
+		for point in rotated:
+			if point.distance_to(wanted) <= STATIC_LAYOUT_ALIGN_TOLERANCE_M:
+				matched += 1
+				break
+	return matched
+
+
+## 老口径：逐个别名相同的实例算「场景里那件的位置角」与「本局清单里那件的位置角」之差，
+## 四舍五入到 90° 后取众数。只在几何匹配并列时用来裁决。
+func _static_layout_name_vote_deg(static_layout: Node3D) -> float:
+	var scene_nodes := {}
+	for child in static_layout.get_children():
+		if child is Node3D:
+			scene_nodes[str(child.name)] = child as Node3D
+	if scene_nodes.is_empty():
+		return 0.0
+	var votes := {}
+	for value in authored_layout_instances:
+		var instance := value as Dictionary
+		var instance_name := str(instance.get("name", ""))
+		if instance_name.is_empty() or not scene_nodes.has(instance_name):
+			continue
+		var local_position := instance.get("position", Vector3.ZERO) as Vector3
+		var scene_position := (
+			static_layout.transform * (scene_nodes[instance_name] as Node3D).position
+		)
+		# 贴原点的实例角度是噪声，跳过。
+		if Vector2(local_position.x, local_position.z).length() < 1.0:
+			continue
+		if Vector2(scene_position.x, scene_position.z).length() < 1.0:
+			continue
+		var raw := rad_to_deg(
+			atan2(scene_position.z, scene_position.x)
+			- atan2(local_position.z, local_position.x)
+		)
+		var bucket := int(round(wrapf(raw, -180.0, 180.0) / 90.0)) * 90
+		votes[bucket] = int(votes.get(bucket, 0)) + 1
+	var best_bucket := 0
+	var best_count := 0
+	for bucket in votes:
+		if int(votes[bucket]) > best_count:
+			best_count = int(votes[bucket])
+			best_bucket = int(bucket)
+	return float(best_bucket)
+
+
+## 把静态场景里那件「本房自持的门墙件」搬回本局门位。
+##
+## 目标位置/朝向直接取生成器清单里**本房拥有**的那条 `door_wall` 记录 —— 判据
+## `_authored_wall_door_side()` 与 `_build_authored_layout_shell` 的取舍同源，
+## 所以搬完的位置与本局几何、门扇、碰撞天然一致，不需要另立一套坐标口径。
+## 没有交换出入口时目标就是原位，本函数幂等。
+func _rehome_static_layout_door(static_layout: Node3D) -> void:
+	var door_node: Node3D = null
+	for child in static_layout.get_children():
+		if not (child is Node3D):
+			continue
+		var child_3d := child as Node3D
+		# 认「组件来源」而不是节点名：实测同一批场景里门墙件既有
+		# `ENV-EXPEDITION-L-CORRIDOR-WALL_X_35_SOUTH`（名字里根本没有 door），
+		# 也有 `GenericShell_DOORWALL_west_xm70_m47_5`。按名字认会漏掉前者，
+		# 结果是交换出入口后自持侧永久缺一段墙（可从房里走出去）。
+		if child_3d.scene_file_path.contains("wall_door"):
+			door_node = child_3d
+			break
+	if door_node == null:
+		return
+	var half := get_dimensions() * 0.5
+	var target: Dictionary = {}
+	var target_side := ""
+	for value in authored_layout_instances:
+		var instance := value as Dictionary
+		# 门墙有两种来源：房表直接写 `slot_role=door_wall`，或实墙槽被**提升**
+		# （`_build_authored_layout_shell` 的 promoted 分支）。两类槽都要看，
+		# 归属只由 `_authored_wall_door_side()` 判定 —— 它与装配层的取舍同源。
+		if str(instance.get("slot_role", "")) not in ["solid_wall", "door_wall"]:
+			continue
+		var local_position := instance.get("position", Vector3.ZERO) as Vector3
+		target_side = _authored_wall_door_side(local_position, half)
+		if target_side.is_empty():
+			continue
+		target = instance
+		break
+	if target.is_empty():
+		return
+	# 清单在房间帧；门墙在已对齐的美术根下，必须反变换，不能再次叠加根的旋转。
+	# 目标门墙的局部轴可能与源实墙不同，必须与动态 uses_door 分支使用同一门墙轴契约。
+	var source_rotation_y_deg := fposmod(float(target.get("rotation_y_deg", 0.0)), 360.0)
+	var target_rotation_y_deg := (
+		floorf(source_rotation_y_deg / 180.0) * 180.0
+		+ (0.0 if target_side in ["north", "south"] else 90.0)
+	)
+	var target_position := target.get("position", static_layout.transform * door_node.position) as Vector3
+	# 替换件原点为门洞底面，不继承源实墙为其自身几何烘焙的负标高。
+	target_position.y = 0.0
+	var room_transform := Transform3D(
+		Basis(Vector3.UP, deg_to_rad(target_rotation_y_deg)).scaled(door_node.scale),
+		target_position
+	)
+	var previous_position := door_node.position
+	door_node.transform = static_layout.transform.affine_inverse() * room_transform
+	# 搬走 = 原位永久留一个 5m 洞（可从房里走出去）。这是「门墙件唯一」模型的必然缺口：
+	# `_seal_stray_door_walls()` 只处理**还在场的**门墙件，搬走的那件它看不见。
+	if not previous_position.is_equal_approx(door_node.position):
+		_backfill_rehomed_door_spot(static_layout, previous_position)
+
+
+## 门墙件被搬到新门位后，用**同侧实墙件**复制一段补回原位 —— 与 `_seal_stray_door_walls()`
+## 同一套补墙口径（同侧复制 ⇒ 墙样式、朝向与本侧其余墙段逐项一致）。
+## 原位侧判不出来（L 形凹口处的件）一律不动，避免把凹口当边界补墙。
+func _backfill_rehomed_door_spot(static_layout: Node3D, previous_position: Vector3) -> void:
+	var half := get_dimensions() * 0.5
+	var basis := static_layout.transform.basis
+	var side := _authored_wall_side_from_position(static_layout.transform * previous_position, half)
+	if side.is_empty():
+		return
+	# 🔴 原位若是**本局的活门位**，一律不许补墙。
+	#
+	# 为什么：门墙件「唯一」意味着它在烘焙帧只坐在其中一扇门上；本局出入口交换后它被搬到
+	# 自持侧，留下的原位**常常正是另一扇活门**（与父房共享的那扇，由共享边所有者提供门墙件）。
+	# 无脑补墙 = 把那扇门用实墙焊死 —— 实测 2026-10-14 的 14 个种子里每局有 3~7/12 扇门被堵，
+	# 其中 80% 是补墙压门，个别种子连**入口安全屋唯一出口**都被封（业主截图现象）。
+	# 判据用 `_authored_wall_connection_side`（只认「本局 doors + 门槽偏移命中」，不含归属），
+	# 与 `_authored_wall_door_side` 的差别是**不看 owns_door_endpoint** —— 共享边另一端持有时
+	# 本端同样不能补，否则一样压住那扇共享门。原位不是活门位时行为逐字不变。
+	if not _authored_wall_connection_side(
+		static_layout.transform * previous_position, half
+	).is_empty():
+		return
+	var donor := _solid_wall_donor(static_layout, basis, half, side)
+	if donor == null:
+		push_warning(
+			"DungeonRoom3D: %s 的门墙件搬走后 %s 侧找不到实墙件可补洞（该侧会漏空）"
+			% [room_id, side]
+		)
+		return
+	var patch := donor.duplicate() as Node3D
+	if patch == null:
+		return
+	patch.name = "%s_RehomeFill" % str(donor.name)
+	patch.transform = Transform3D(
+		donor.transform.basis,
+		Vector3(previous_position.x, donor.transform.origin.y, previous_position.z)
+	)
+	static_layout.add_child(patch)
+
+
+## 门墙件 = 带**通透门洞**的那一件。只认组件来源：实测同一批场景里门墙件的来源既有
+## `wall_door_5m_root_top3d.tscn`，也有反序的 `door_wall_root_top3d.tscn`；而
+## `CameraOnlyDoorWall_*` 这类**相机代理节点**名字里带 DoorWall、`scene_file_path`
+## 却是空的（没有几何也没有碰撞），按名字认会把它当门墙件误补墙。
+static func _is_door_wall_piece(node: Node3D) -> bool:
+	var source := node.scene_file_path
+	return source.contains("wall_door") or source.contains("door_wall")
+
+
+func _raise_expedition_02_static_walls_to_ceiling(static_layout: Node3D) -> void:
+	if not _is_expedition_02_static_layout() or static_layout == null:
+		return
+	const CEILING_BOTTOM_Y_M := 4.0
+	const EXISTING_WALL_TOP_Y_M := 3.0
+	const EXTENSION_HEIGHT_M := CEILING_BOTTOM_Y_M - EXISTING_WALL_TOP_Y_M
+	if EXTENSION_HEIGHT_M <= 0.001:
+		return
+	var added := 0
+	for child in static_layout.get_children():
+		var wall := child as Node3D
+		if wall == null:
+			continue
+		var source := wall.scene_file_path
+		if not (
+			source.contains("wall_standard_5m_h3")
+			or source.contains("wall_door_5m_h3")
+		):
+			continue
+		var extension_name := "%s_CeilingExtensionH4" % wall.name
+		if static_layout.get_node_or_null(extension_name) != null:
+			continue
+		var mesh_instance := MeshInstance3D.new()
+		mesh_instance.name = extension_name
+		var box := BoxMesh.new()
+		box.size = Vector3(5.0, EXTENSION_HEIGHT_M, 0.3)
+		mesh_instance.mesh = box
+		mesh_instance.transform = Transform3D(
+			wall.transform.basis,
+			wall.transform.origin + Vector3.UP * (EXISTING_WALL_TOP_Y_M + EXTENSION_HEIGHT_M * 0.5)
+		)
+		mesh_instance.set_meta("expedition_02_wall_height_extension", true)
+		mesh_instance.set_meta("wall_height_m", CEILING_BOTTOM_Y_M)
+		var source_mesh := wall.find_child("ImportedModel", true, false)
+		var source_visual: MeshInstance3D = null
+		if source_mesh != null:
+			var source_visuals := source_mesh.find_children("*", "MeshInstance3D", true, false)
+			if not source_visuals.is_empty():
+				source_visual = source_visuals[0] as MeshInstance3D
+		if source_visual != null:
+			var source_material := source_visual.get_active_material(0)
+			if source_material != null:
+				mesh_instance.material_override = source_material
+		static_layout.add_child(mesh_instance)
+		var body := StaticBody3D.new()
+		body.name = "%s_Collision" % extension_name
+		body.collision_layer = 1
+		body.collision_mask = 0
+		body.set_meta("camera_lower_wall", true)
+		body.set_meta("expedition_02_wall_height_extension", true)
+		var collision := CollisionShape3D.new()
+		var shape := BoxShape3D.new()
+		shape.size = box.size
+		collision.shape = shape
+		body.transform = mesh_instance.transform
+		body.add_child(collision)
+		static_layout.add_child(body)
+		added += 1
+	if added > 0:
+		static_layout.set_meta("expedition_02_runtime_wall_height_m", CEILING_BOTTOM_Y_M)
+		static_layout.set_meta("expedition_02_runtime_wall_height_extension_count", added)
+
+
+## 废门洞：门墙件落在本局**没有门**的侧上 ⇒ 补一段同侧实墙。
+##
+## 这一类洞是**烘焙时就留下的**，不是随机拼接造成的：办公室房型的源清单把自有的那扇门
+## 开在长墙上，而本关把端口放在短墙（实测 room_03 南墙 / room_09 北墙各留一个 5m 洞，
+## 射线打过去空无一物、玩家能从那里走出房间；把随机拼接整个回退到基线版图同样报这两条）。
+##
+## 修法只动这一件：从**同一侧**的实墙件复制一段补上，再释放原门墙件 —— 它的碰撞体
+## 必须一起走，否则门洞的净空还在（门墙的碰撞是两根门垛 + 门楣，中间本来就是空的）。
+## 同侧复制保证墙样式、朝向与本侧其余墙段逐项一致，不引入第二套坐标口径。
+##
+## 侧判不出来的是 L 形轮廓凹口处的件（`_authored_wall_side_from_position` 在容差外返回空），
+## 它们的归属另有口径 ⇒ 一律不动。
+func _seal_stray_door_walls(static_layout: Node3D) -> void:
+	var half := get_dimensions() * 0.5
+	var basis := Basis(Vector3.UP, static_layout.rotation.y)
+	var strays: Array[Node3D] = []
+	for child in static_layout.get_children():
+		if not (child is Node3D):
+			continue
+		var node := child as Node3D
+		if not _is_door_wall_piece(node):
+			continue
+		var side := _authored_wall_side_from_position(basis * node.position, half)
+		if side.is_empty() or side in doors:
+			continue
+		strays.append(node)
+	for stray in strays:
+		var side := _authored_wall_side_from_position(basis * stray.position, half)
+		var donor := _solid_wall_donor(static_layout, basis, half, side)
+		var stray_position := stray.position
+		var stray_name := str(stray.name)
+		static_layout.remove_child(stray)
+		stray.free()
+		if donor == null:
+			push_warning(
+				"DungeonRoom3D: %s 的 %s 侧有废门洞，但本侧找不到实墙件可补" % [room_id, side]
+			)
+			continue
+		var patch := donor.duplicate() as Node3D
+		patch.name = "%s_SolidFill" % stray_name
+		patch.position = stray_position
+		static_layout.add_child(patch)
+
+
+## 补墙用的实墙来源：优先**同一侧**的墙（样式与朝向一致），找不到才退而取任意一件墙。
+func _solid_wall_donor(
+	static_layout: Node3D, basis: Basis, half: Vector2, side: String
+) -> Node3D:
+	var fallback: Node3D = null
+	for child in static_layout.get_children():
+		if not (child is Node3D):
+			continue
+		var node := child as Node3D
+		if _is_door_wall_piece(node):
+			continue
+		if not node.scene_file_path.get_file().begins_with("wall"):
+			continue
+		if fallback == null:
+			fallback = node
+		if _authored_wall_side_from_position(basis * node.position, half) == side:
+			return node
+	return fallback
+
+
+## 清掉「坐在本局门槽上的实墙」—— 让本局的门真的通。
+##
+## 为什么必需：远征房间的壳来自**预烘焙静态场景**，墙位按烘焙帧排；本局门槽却由生成器
+## 按链式拼接现算，两者只靠 `_align_static_layout_to_room()` 的**整体刚体旋转**对齐。
+## 旋转不改变「哪一件墙在哪一侧」的相对关系，于是烘焙帧某段实墙落到本局门槽上时，
+## 没有任何机制把它移开 ⇒ 门被焊死。
+##
+## 实测（2026-10-14，业主报「room_09 到 room_10 的门开起来又被堵住」）：
+## `room_10` 烘焙帧是 40×30，北侧 6 段实墙（x=−12.5…12.5 全实墙）；本局是 30×40 `rot=270`，
+## 对齐后这 6 段整体落到**东侧**（lane −12.5…12.5），其中 `x=12.5` 那段正压在本局
+## 「东门 → room_09」的门槽（lane 12.5）上。该边由 room_09 持有门
+## （`door_endpoint_owners["east"] = false`）⇒ room_10 侧既不生成门墙件顶替，
+## `_seal_stray_door_walls()` 也只管门墙件（且 east 在 `doors` 里，天然跳过）⇒ 永久堵死。
+##
+## 判据 = 墙落面 ∈ 本局 `doors` **且**沿墙偏移命中该侧**真实门槽车道**（见 `_live_door_lane()`）。
+## 所以只在门位上动手，非门位的墙一段不动（含 `_seal_stray_door_walls()` 与
+## `_backfill_rehomed_door_spot()` 的补墙）。门墙件（带通透门洞那件）不在此列 ——
+## 它本身就是门，归属由 `_rehome_static_layout_door()` 负责。
+func _clear_connection_port_walls(static_layout: Node3D) -> void:
+	var half := get_dimensions() * 0.5
+	var basis := static_layout.transform.basis
+	var strays: Array[Node3D] = []
+	var cleared: Array[String] = []
+	for child in static_layout.get_children():
+		if not (child is Node3D):
+			continue
+		var node := child as Node3D
+		# 门墙件是门本身，不在此列。
+		if _is_door_wall_piece(node):
+			continue
+		# 与 `_solid_wall_donor()` 同一识别口径：文件名以 wall 开头即墙体件
+		# （`prp_corner_l_5m.tscn` 这类角件不以此开头，天然排除）。
+		if not node.scene_file_path.get_file().begins_with("wall"):
+			continue
+		var world_position := basis * node.position
+		var side := _authored_wall_side_from_position(world_position, half)
+		if side.is_empty() or not doors.has(side):
+			continue
+		var wall_along := world_position.x if side in ["north", "south"] else world_position.z
+		var lane := _live_door_lane(side)
+		var on_slot := false
+		if is_nan(lane):
+			# 本侧端口没声明车道（非计划驱动的老房间）：回退程序化口径。
+			on_slot = not _authored_wall_connection_side(world_position, half).is_empty()
+		else:
+			on_slot = absf(wall_along - lane) <= DOOR_LANE_GUARD_TOLERANCE_M
+		if not on_slot:
+			continue
+		strays.append(node)
+		cleared.append("%s@%s%.1f" % [str(node.name), side, wall_along])
+	for stray in strays:
+		static_layout.remove_child(stray)
+		stray.free()
+	if not cleared.is_empty():
+		set_meta("authored_layout_port_walls_cleared", cleared)
+
+
+## 本房某侧**真实门槽车道**（沿墙偏移，米）——取自连接端口的 `lane_m`。
+##
+## 为什么不读 `tower_wall_door_offset_<side>`：那个 meta 有两个写入方 ——
+## `TowerDescent3D._plan_room_layout()` 写的是**该侧端口的 `lane_m`**（本关实际用的口径），
+## 而基类 `Dungeon3D._plan_room_layout()` 写的是「离 0 最近的 5m 段」启发式。
+## 直读端口即**不依赖 meta 已写入**、也不依赖哪一方最后执行，口径唯一。
+##
+## 返回 `NAN` 表示本侧不是门、或端口未声明车道。
+func _live_door_lane(side: String) -> float:
+	for value in connection_ports:
+		var port := value as Dictionary
+		if str(port.get("side", "")) != side:
+			continue
+		if str(port.get("target_room_id", port.get("target", ""))).is_empty():
+			continue
+		if not port.has("lane_m"):
+			continue
+		return float(port.get("lane_m", 0.0))
+	return NAN
+
+
+func _sync_static_layout_connection_ports(static_layout: Node3D) -> void:
+	var container := static_layout.find_child("ConnectionPorts", true, false) as Node3D
+	if not _static_layout_ports_mismatch(static_layout, connection_ports):
+		static_layout.set_meta("connection_port_count", connection_ports.size())
+		if container != null:
+			container.set_meta("connection_port_count", connection_ports.size())
+		return
+	if container != null:
+		container.get_parent().remove_child(container)
+		container.free()
+	_build_connection_port_markers(static_layout)
+	static_layout.set_meta("connection_port_count", connection_ports.size())
+	var rebuilt := static_layout.find_child("ConnectionPorts", true, false) as Node3D
+	if rebuilt != null:
+		rebuilt.set_meta("connection_port_count", connection_ports.size())
+
+
+static func _static_layout_ports_mismatch(static_layout: Node3D, expected: Array) -> bool:
+	if static_layout == null:
+		return false
+	var container := static_layout.find_child("ConnectionPorts", true, false) as Node3D
+	if container == null:
+		return not expected.is_empty()
+	if container.get_child_count() != expected.size():
+		return true
+	var expected_by_id := {}
+	for value in expected:
+		var port := value as Dictionary
+		var raw := port.get("position_m", []) as Array
+		if raw.size() < 2:
+			return true
+		var position := Vector2(float(raw[0]), float(raw[1]))
+		var outward_raw := port.get("outward", []) as Array
+		if outward_raw.size() < 2:
+			return true
+		var outward := Vector2(float(outward_raw[0]), float(outward_raw[1])).normalized()
+		expected_by_id[str(port.get("port_id", ""))] = {
+			"target": str(port.get("target_room_id", "")),
+			"position": position,
+			"outward": outward,
+			"side": str(port.get("side", "")),
+			"lane_m": float(port.get("lane_m", 0.0)),
+			"connected": not str(port.get("target_room_id", "")).is_empty(),
+		}
+	for child in container.get_children():
+		if not (child is Node3D):
+			return true
+		var marker := child as Node3D
+		var port_id := str(marker.get_meta("port_id", ""))
+		if not expected_by_id.has(port_id):
+			return true
+		var expect := expected_by_id[port_id] as Dictionary
+		if str(marker.get_meta("target_room_id", "")) != str(expect["target"]):
+			return true
+		if str(marker.get_meta("side", "")) != str(expect["side"]):
+			return true
+		if not is_equal_approx(
+				float(marker.get_meta("lane_m", 0.0)), float(expect["lane_m"])
+		):
+			return true
+		if bool(marker.get_meta("connected", false)) != bool(expect["connected"]):
+			return true
+		var expected_position := expect["position"] as Vector2
+		var expected_outward := expect["outward"] as Vector2
+		var marker_to_room := static_layout.transform * container.transform * marker.transform
+		var marker_position := Vector2(marker_to_room.origin.x, marker_to_room.origin.z)
+		var marker_outward := Vector2(marker_to_room.basis.z.x, marker_to_room.basis.z.z).normalized()
+		if marker_position.distance_to(expected_position) > 0.01:
+			return true
+		if marker_outward.dot(expected_outward) < 0.999:
+			return true
+		if not marker.has_meta("position_m"):
+			return true
+		var marker_position_meta: Variant = marker.get_meta("position_m")
+		if not (marker_position_meta is Vector2) or (marker_position_meta as Vector2).distance_to(expected_position) > 0.01:
+			return true
+		var marker_outward_meta := marker.get_meta("outward", Vector2.ZERO) as Vector2
+		if marker_outward_meta.normalized().dot(expected_outward) < 0.999:
+			return true
+	return false
+
+
+func get_service_station(type_id := "") -> ServiceStation3D:
+	for station in _get_service_stations():
+		if type_id.is_empty() or station.station_type == type_id:
+			return station
+	return null
+
+
+func ensure_required_service_station() -> ServiceStation3D:
+	if room_type not in ["MERCHANT", "UPGRADE", "EVENT"]:
+		return null
+	ensure_detail_built()
+	var type_id := room_type.to_lower()
+	var existing := get_service_station(type_id)
+	if existing != null:
+		return existing
+	return _create_service_station(type_id, get_dimensions())
+
+
+func _get_service_stations() -> Array[ServiceStation3D]:
+	var result: Array[ServiceStation3D] = []
+	for value in find_children("*", "ServiceStation3D", true, false):
+		if value is ServiceStation3D:
+			result.append(value as ServiceStation3D)
+	return result
+
+
+func _expedition_static_layout_path() -> String:
+	if not use_expedition_static_layout_scenes or static_layout_scene_path.is_empty():
+		return ""
+	return static_layout_scene_path if ResourceLoader.exists(static_layout_scene_path) else ""
+
+
+func _is_expedition_02_static_layout() -> bool:
+	return static_layout_scene_path.contains("/expedition_02/")
+
+
+func _build_runtime_doors_only() -> void:
+	var dimensions := get_dimensions()
+	# 远征02当前阶段先移除普通连接门：connection_ports 仍保留给路线、房间触发
+	# 和共享边校验，但不再生成 RoomDoor3D 门扇或门扇碰撞。入口安全房的
+	# 空目标方向是唯一例外，它仍生成无拓扑边的弃局门，供 expedition_retreat
+	# 绑定使用；这让“去掉门”和“安全房必须可退出”不互相冲突。
+	if _is_expedition_02_static_layout():
+		for direction in doors:
+			if str(door_targets.get(direction, "")).is_empty():
+				_build_door(direction, "", dimensions)
+		_apply_authored_runtime_door_contract(dimensions)
+		return
+	# 端口是设计源的**权威门位声明**（位置、所在墙、门宽都在里面），一墙多门也表达得了。
+	# 判据是「端口**带门位声明**」而不是「有 connection_ports」—— 理由见
+	# `_has_authoritative_door_ports()`：塔楼房间没有该字段，constrained 关卡的端口
+	# 只有拓扑信息，两者都得走下面的方向粒度路径，行为逐字不变。
+	# 为什么必须分叉：`RoomDoor3D` 一个方向只能有一个节点（`_door_nodes[direction]`），
+	# 按方向建门会让同一面墙的 N 扇门只建出 1 扇、其余门洞永远是洞
+	# （远征02 实测：21 个门洞只建出 11 扇门扇，另有 3 扇门扇悬在没有洞的地方）。
+	if _has_authoritative_door_ports():
+		var sides_with_ports: Dictionary = {}
+		for port_value in connection_ports:
+			var port := port_value as Dictionary
+			if _build_door_for_port(port, dimensions):
+				sides_with_ports[str(port.get("side", ""))] = true
+		# 没有端口的门位仍按方向补建。
+		#
+		# 为什么需要：设计源可以只声明"这个方向有一扇门"而不给端口 —— 远征入口安全房的
+		# 「封闭气闸门」正是这种（`target` 为空、不挂地图边、不参与拓扑、也不伪造可走路线，
+		# 只负责补齐安全房造型与"退出战局"交互位）。端口里查不到它，
+		# 不补建就会把它连同安全房门位造型一起静默丢掉。
+		# 反过来，**有端口的方向一律以端口为准**：那些端口若是 5m 通洞，
+		# 就说明该方向本来就没有门扇，补建才是错的（旧行为曾在通洞里插门）。
+		for direction in doors:
+			if sides_with_ports.has(direction):
+				continue
+			if not str(door_targets.get(direction, "")).is_empty():
+				continue
+			_build_door(direction, "", dimensions)
+	else:
+		for direction in doors:
+			_build_door(direction, str(door_targets.get(direction, "")), dimensions)
+	_apply_authored_runtime_door_contract(dimensions)
+
+
+## 端口的**门位声明**是否权威 —— 只有设计源明确写了门宽或门轴，端口才能当门位用。
+##
+## 为什么必须区分：`mode = constrained` 的关卡（远征01）几何由生成器按种子现算，
+## 它的端口只带 `position_m` + `outward`（拓扑用），**门位由生成器算**。
+## 拿这种端口当门位会把门扇全过滤掉（门宽读到 0 ⇒ 判成通洞）——
+## 实测远征01 从 13 扇门掉到 1 扇。塔楼房间则连 `connection_ports` 都没有。
+## 两者都必须保留按方向建门的旧行为，本判据把它们一起挡在端口粒度之外。
+func _has_authoritative_door_ports() -> bool:
+	for port_value in connection_ports:
+		var port := port_value as Dictionary
+		if float(port.get("door_width_m", 0.0)) > 0.0:
+			return true
+		if not str(port.get("door_axis", "")).is_empty():
+			return true
+	return false
+
+
+## 该门宽是否要建**实体门扇**。
+## 2.2m 标准门要；5m 通洞 / 坍塌门洞是纯开口，白盒里本来就没有墙件，不建。
+## 与白盒门表同源：远征02 门宽 ≤3m 的端口 21 个 = 静态布局里 21 个 `wall_door` 件。
+func _port_creates_door_leaf(width_m: float) -> bool:
+	if width_m <= 0.0:
+		return false
+	return width_m <= 3.0
+
+
+## 门扇视觉二选一，两条都是正式美术，区别在语义而不是画质：
+##   FACILITY（99F 基地）/ 和平区（区块00）—— 滑升门，自带独立 logic_id 与状态灯，
+##   不随楼层主题换材质；
+##   其余（普通战斗房 / BOSS 房 / 入口安全房）—— 塔楼 A 套门扇，与门墙共用 +Z 约定。
+func _door_panel_visual(target_room_id: String) -> PackedScene:
+	if (
+		room_type == "FACILITY"
+		or (room_id == "start" and target_room_id == "facility")
+		or authored_layout_peaceful
+	):
+		return BASE99_DOOR_LIFT_PREFAB
+	return TOWER_DOOR_LEAF_PREFAB
+
+
+## 按**连接端口**建一扇门扇。返回是否真的建成了。
+##
+## 位置直接取端口的房间局部坐标（= 白盒门洞中心），不再用「方向 + 房间半宽」推算：
+## 同一面墙有多扇门时后者只能算出一个位置（房间半宽那个点），
+## 其余门洞会永远缺门扇 —— 远征02 的长廊 `room_02` 西墙 5 扇、东墙 5 扇，
+## 按方向只建出 2 扇，偏移最远 60m。
+func _build_door_for_port(port: Dictionary, dimensions: Vector2) -> bool:
+	var port_id := str(port.get("port_id", ""))
+	var side := str(port.get("side", ""))
+	var target_id := str(port.get("target_room_id", port.get("target", "")))
+	var width := float(port.get("door_width_m", 0.0))
+	if port_id.is_empty() or side.is_empty():
+		# side 派生不出来时 `LevelPlanLoader` 已告警；这里不再静默补一扇位置不明的门。
+		return false
+	if not _port_creates_door_leaf(width):
+		return false
+	if authored_layout_asset_id == "ENV-BATTLE-BLOCK00-ART-LAYOUT-3D" and Block00MasterOfficeLayout3D.is_removed_door_pair(room_id, target_id):
+		return false
+	if not owns_door_endpoint(side):
+		return false
+	var raw_position := port.get("position_m", []) as Array
+	if raw_position.size() < 2:
+		return false
+	var door := DOOR_SCENE.instantiate() as RoomDoor3D
+	if door == null:
+		push_error("通用RoomDoor3D Prefab实例化失败")
+		return false
+	door.configure(side, target_id, theme.accent_color, _door_panel_visual(target_id))
+	door.set_access_policy(door_policies.get(side, {}) as Dictionary)
+	door.set_meta("camera_lower_wall", side in ["north", "south"])
+	door.set_meta("connection_port_id", port_id)
+	# A 套门扇声明 visual_only 且不自带碰撞，本段对它是空跑。
+	# 保留为廉价保险：门扇包一旦又带上静态碰撞（B 套那个包就带），它不会随升降门
+	# 逻辑启用/禁用，必须让位给 RoomDoor3D 自己的升降碰撞，否则门永远开不了。
+	var door_leaf := door.get_node_or_null("DoorPanel/ImportedDoorVisual")
+	if door_leaf != null:
+		_disable_static_collision_descendants(door_leaf)
+	door.position = Vector3(float(raw_position[0]), float(port.get("height_m", 0.0)), float(raw_position[1]))
+	if side in ["west", "east"]:
+		door.rotation.y = PI * 0.5
+	add_child(door)
+	# 门扇自身按 `Door_<方向>` 命名，同方向多门会重名（Godot 会加 @ 尾号），
+	# 这里补上 port_id 让节点名可读、也便于探针按端口定位。
+	door.name = "Door_%s_%s" % [side.capitalize(), port_id]
+	if not _door_nodes.has(side):
+		_door_nodes[side] = door
+	_door_nodes_by_port[port_id] = door
+	return true
+
+
+## 按端口取门扇。一墙多门时 `get_door_node(方向)` 只能返回该方向第一扇，
+## 共享门配对必须用它才能拿到"通向指定那一间"的那扇。
+func get_door_node_by_port(port_id: String) -> RoomDoor3D:
+	return _door_nodes_by_port.get(port_id) as RoomDoor3D
+
+
+## 取「通向 `target_room_id` 那一间」的门扇。
+##
+## 与 `get_door_node(方向)` 的差别：方向是本房自己的叫法，"通向哪一间"才是跨房的同一件事 ——
+## 共享边上两端的方向名不同（room_02 叫 east、room_03 叫 west），只有按目标房才认得同一扇门。
+##
+## 为什么需要它：共享边只有一端持有门扇，另一端（本房）的 `_door_nodes` 里**没有节点**。
+## 封锁一个房间时必须能关掉"进来时那扇门"，而它在对端手里 —— 调用方拿本房的方向去
+## `get_door_node()` 会拿到 null 并静默什么都不做（2026-10-16 业主报的"封门后还能走出去"
+## 就是这个静默空转）。本函数给调用方一个**按目标房**找门的入口。
+##
+## 回退链：① 本房 `_door_nodes` 里 `target_room_id` 匹配的（含共享绑定进来的）；
+## ② 本房 `door_targets` 里该目标对应的方向（方向标号可能与门扇自身记录不同）。
+func get_door_node_towards(target_room_id: String) -> RoomDoor3D:
+	if target_room_id.is_empty():
+		return null
+	for value in _door_nodes.values():
+		var door := value as RoomDoor3D
+		if door != null and door.target_room_id == target_room_id:
+			return door
+	for direction_value in door_targets.keys():
+		if str(door_targets[direction_value]) == target_room_id:
+			return _door_nodes.get(direction_value) as RoomDoor3D
+	return null
+
+
+## 静态 TSCN 只接管视觉与固定碰撞；门槽 lane 归属仍必须按本局拓扑重新计算。
+## 该步骤只读取实例清单，不生成第二套墙/地砖/设施。
+func _apply_authored_runtime_door_contract(dimensions: Vector2) -> void:
+	if not authored_layout_shell:
+		return
+	# 显式端口静态场景在生成阶段已经完成“所有者提升门墙 / 非所有者删除共墙”。
+	# authored_layout_instances 保留的是生成前原始清单，再用它复判会把已删除的默认封墙
+	# 误报成运行时实墙；共享门也不再需要旧版隐藏第二块 DoorPanel 的委派逻辑。
+	if not connection_ports.is_empty():
+		var owner_sides: Array[String] = []
+		var delegated_sides: Array[String] = []
+		for direction_value in doors:
+			var direction := str(direction_value)
+			if owns_door_endpoint(direction):
+				owner_sides.append(direction)
+			else:
+				delegated_sides.append(direction)
+		set_meta("authored_layout_door_wall_sides", owner_sides)
+		set_meta("authored_layout_delegated_door_sides", delegated_sides)
+		set_meta("authored_layout_unresolved_instances", [])
+		return
+	var half := dimensions * 0.5
+	var authored_wall_records: Array = []
+	for value in authored_layout_instances:
+		var instance := value as Dictionary
+		var role := str(instance.get("slot_role", ""))
+		if role not in ["solid_wall", "door_wall"]:
+			continue
+		var local_position := instance.get("position", Vector3.ZERO) as Vector3
+		var wall_side := _authored_wall_side_from_position(local_position, half)
+		if wall_side.is_empty():
+			wall_side = _authored_wall_direction(float(instance.get("rotation_y_deg", 0.0)))
+		var wall_along := local_position.z
+		var wall_depth := local_position.x
+		if wall_side in ["north", "south"]:
+			wall_along = local_position.x
+			wall_depth = local_position.z
+		authored_wall_records.append({
+			"side": wall_side,
+			"along": wall_along,
+			"depth": wall_depth,
+			"uses_door": not _authored_wall_door_side(local_position, half).is_empty(),
+		})
+	var door_wall_sides: Array[String] = []
+	var wall_sides: Array[String] = []
+	for record_value in authored_wall_records:
+		var record := record_value as Dictionary
+		var record_side := str(record.get("side", ""))
+		if record_side.is_empty():
+			continue
+		if record_side not in wall_sides:
+			wall_sides.append(record_side)
+		if bool(record.get("uses_door", false)) and record_side not in door_wall_sides:
+			door_wall_sides.append(record_side)
+	var delegated_sides: Array[String] = []
+	for direction in doors:
+		var door_offset := float(get_meta("tower_wall_door_offset_%s" % direction, 0.0))
+		match classify_door_lane(
+			authored_wall_records, direction, door_offset, door_plane_depth(direction, half)
+		):
+			"door_wall":
+				continue
+			"solid_wall":
+				push_error(
+					"DungeonRoom3D: 静态布局 %s 的 %s 门槽 lane 上仍是实墙"
+					% [room_id, direction]
+				)
+			_:
+				delegated_sides.append(direction)
+	var common_shell_owns_door := (
+		authored_layout_asset_id.begins_with("ENV-EXPEDITION-L01-DB-")
+		or authored_layout_asset_id.begins_with("ENV-EXPEDITION-L01-CORRIDOR-")
+	)
+	for direction in delegated_sides:
+		if common_shell_owns_door and door_wall_sides.is_empty():
+			continue
+		var delegated_door := get_door_node(direction)
+		if delegated_door == null:
+			continue
+		var panel := delegated_door.get_node_or_null("DoorPanel") as Node3D
+		if panel != null:
+			panel.visible = false
+		delegated_door.set_meta("authored_shared_door_delegated", true)
+		delegated_door.set_meta("authored_shared_door_owner_side", true)
+	set_meta("authored_layout_door_wall_sides", door_wall_sides)
+	set_meta("authored_layout_wall_sides", wall_sides)
+	set_meta("authored_layout_delegated_door_sides", delegated_sides)
+	set_meta("authored_layout_unresolved_instances", [])
+
+
+func _build_shell() -> void:
+	var expedition_static_path := _expedition_static_layout_path()
+	if not expedition_static_path.is_empty():
+		var static_scene := load(expedition_static_path) as PackedScene
+		if static_scene == null:
+			push_error("DungeonRoom3D: 远征房间静态场景无法加载 %s" % expedition_static_path)
+		else:
+			var static_layout := static_scene.instantiate() as Node3D
+			if static_layout == null:
+				push_error("DungeonRoom3D: 远征房间静态场景根节点不是 Node3D %s" % expedition_static_path)
+			else:
+				var static_room_id := str(static_layout.get_meta("room_id", ""))
+				var static_instance_total := int(static_layout.get_meta("layout_instance_total", -1))
+				if not static_room_id.is_empty() and static_room_id != room_id:
+					push_error(
+						"DungeonRoom3D: 静态场景房间 ID 不符，期望 %s，实得 %s"
+						% [room_id, static_room_id]
+					)
+				# 静态场景**照常使用** —— 它是本关美术的唯一来源（手工排布的墙样式、
+				# 地砖、装饰、灯、专属件都在里面），程序化壳体拿不出同等观感。
+				#
+				# 它与随机拼接的冲突只有两点，都由 `_align_static_layout_to_room` 就地化解：
+				#   ① 朝向：场景按烘焙朝向固化（实测 room_01 的场景坐标与生成器
+				#      `rotation_deg=270` 的清单逐位吻合）⇒ 整体绕 Y 转回本局朝向；
+				#   ② 门位归属：与父房共享的那扇门由父端提供，本端烘焙时不生成 ⇒ 交换
+				#      出入口后把那一件门墙件搬回本局自持侧。
+				# 两者都是刚体级操作（转 + 挪一件），**其余实例一件不动**。
+				_align_static_layout_to_room(static_layout)
+				if static_layout != null:
+					_raise_expedition_02_static_walls_to_ceiling(static_layout)
+					static_layout.name = (
+						"SafeRoomArtRoot" if room_id == "start" else "AuthoredLayoutArtRoot"
+					)
+					add_child(static_layout)
+					_restore_static_layout_camera_wall_contract(static_layout)
+					for child in static_layout.get_children():
+						if bool(child.get_meta("editor_preview_only", false)) and child is Node3D:
+							(child as Node3D).visible = false
+					set_meta("static_layout_scene_path", expedition_static_path)
+					set_meta("static_layout_scene_loaded", true)
+					for key in [
+						"authored_layout_shell", "authored_layout_asset_id", "authored_layout_version",
+						"authored_layout_room_id", "authored_layout_corner_count", "authored_layout_solid_wall_count",
+						"authored_layout_door_wall_count", "authored_layout_floor_tile_count",
+						"authored_layout_exclusive_count", "authored_layout_multi_level_count",
+						"authored_layout_room_type_component_count", "authored_layout_promoted_walls",
+						"walk_surface_y_m",
+						"walkable_navigation_polygons",
+						"fog_profile",
+						"authored_room_light_switch",
+						"walk_surface_owner",
+						"walk_surface_scene",
+					]:
+						# 「根优先、命中即止」向下找一层，**不是**只读根：绑定壳
+						# （99 / 远征01 的 `f00_boss_static_layout.tscn`）里房间是
+						# **实例进来的子场景**，一半声明写在壳根上、另一半写在共享房自己的
+						# 根上（如 `walk_surface_owner`）。只读根会把后者漏掉，同一份共享房
+						# 在不同关卡里就会表现不一致。字段本身与共享值一致时行为逐字不变。
+						var declared: Variant = _find_static_layout_meta(static_layout, key)
+						if declared != null:
+							set_meta(key, declared)
+					var declared_light_switch: Variant = _find_static_layout_meta(
+						static_layout, "authored_room_light_switch"
+					)
+					if declared_light_switch != null:
+						authored_room_light_switch = bool(declared_light_switch)
+					# 安全房 v007 的房间级事实（版本/旋转步/四角 L/房间包数）随静态布局
+					# 保存，加载后回填到房间节点：快照与入口房验收按房间 meta 读取它们。
+					for meta_name in static_layout.get_meta_list():
+						var static_meta_key := str(meta_name)
+						if static_meta_key.begins_with("safe_room_"):
+							set_meta(static_meta_key, static_layout.get_meta(static_meta_key))
+					_build_runtime_doors_only()
+					_adopt_static_port_door_visuals(static_layout)
+					_sync_expedition_static_camera_door_proxies(static_layout)
+					_restore_static_layout_camera_wall_contract(static_layout)
+					# 远征01 入口安全房（room_id="start"，STAIR_LOBBY）走本静态布局分支，
+					# **不经过** `_build_safe_room_shell()` ⇒ EXIT 标牌必须在此单独补一次，
+					# 否则只有塔楼/程序化安全房有、远征入口房没有（2026-10-12 业主反馈）。
+					# 位置/朝向仍按本局**世界门向**推导，与 `_build_runtime_doors_only()` 的门扇同口径；
+					# 静态布局的烘焙朝向由 `_align_static_layout_to_room()` 负责，标牌挂房间根、不受其影响。
+					if room_type == "STAIR_LOBBY":
+						_build_safe_room_exit_sign(get_dimensions())
+					return
+	var dimensions := get_dimensions()
+	_floor_material = _material(theme.floor_color, 0.08, 0.90)
+	_wall_material = _material(theme.wall_color, 0.62, 0.62)
+	_trim_material = _material(theme.trim_color, 0.74, 0.38)
+	# 基地走专属材质：地板用 FACILITY_FLOOR_TILE_A/B（由 _build_base_facility_shell
+	# 单独覆盖），墙由 _get_wall_module_material 接管，trim 替换为深褐色装饰带。
+	if room_type == "FACILITY":
+		_trim_material = FACILITY_TRIM_MATERIAL
+	if tower_module_shell:
+		# 授权布局优先：壳体由外部 5m 组件清单接管，程序化塔楼模块一律不生成。
+		# 顺序必须在 tower_module_shell 之前 —— 两个开关同时为真时（98F 区块00
+		# 的房间记录两处都置真），走授权路径。
+		if authored_layout_shell:
+			_build_authored_layout_shell(dimensions)
+			if authored_layout_asset_id == "ENV-BATTLE-BLOCK00-ART-LAYOUT-3D":
+				var facilities_path := Block00MasterOfficeLayout3D.facility_scene_path(authored_layout_room_id)
+				var facilities := load(facilities_path) as PackedScene
+				if facilities != null:
+					add_child(facilities.instantiate())
+			return
+		_build_tower_module_shell(dimensions)
+		return
+	# Floor：1×1×1 prefab + scale = (dim.x, 0.36, dim.y)
+	_spawn_prefab("Floor", FLOOR_PREFAB, Vector3(0, -0.18, 0), Vector3(dimensions.x, 0.36, dimensions.y), _floor_material)
+	_spawn_prefab("FloorInset", FLOOR_INSET_PREFAB, Vector3(0, 0.012, 0), Vector3(dimensions.x * 0.80, 0.025, dimensions.y * 0.80), _material(theme.floor_color.lightened(0.055), 0.04, 0.94))
+	for x in range(-int(dimensions.x * 0.4), int(dimensions.x * 0.4), 3):
+		_spawn_prefab("FloorSeam", FLOOR_SEAM_PREFAB, Vector3(float(x), 0.03, 0), Vector3(0.025, 0.018, dimensions.y * 0.76), _trim_material)
+	if size_class == "rooftop":
+		_build_rooftop_shell(dimensions)
+		return
+	_build_wall("north", Vector3(0, 1.4, -dimensions.y * 0.5), dimensions.x, Vector3(1, 0, 0), _wall_door_lane("north"))
+	_build_wall("south", Vector3(0, 1.4, dimensions.y * 0.5), dimensions.x, Vector3(1, 0, 0), _wall_door_lane("south"))
+	_build_wall("west", Vector3(-dimensions.x * 0.5, 1.4, 0), dimensions.y, Vector3(0, 0, 1), _wall_door_lane("west"))
+	_build_wall("east", Vector3(dimensions.x * 0.5, 1.4, 0), dimensions.y, Vector3(0, 0, 1), _wall_door_lane("east"))
+	for direction in doors:
+		_build_door(direction, str(door_targets.get(direction, "")), dimensions)
+	for corner in [
+		Vector3(-dimensions.x * 0.5, 1.45, -dimensions.y * 0.5),
+		Vector3(dimensions.x * 0.5, 1.45, -dimensions.y * 0.5),
+		Vector3(-dimensions.x * 0.5, 1.45, dimensions.y * 0.5),
+		Vector3(dimensions.x * 0.5, 1.45, dimensions.y * 0.5),
+	]:
+		_spawn_prefab("CornerPost", CORNER_POST_PREFAB, corner, Vector3(0.42, 2.9, 0.42), _trim_material)
+	if size_class == "floor":
+		_build_floor_partitions(dimensions)
+
+
+func _build_rooftop_shell(dimensions: Vector2) -> void:
+	for direction in ["north", "south", "west", "east"]:
+		_build_rooftop_exterior_wall(direction, dimensions)
+		_build_rooftop_railing(direction, dimensions)
+	for direction in doors:
+		_build_door(direction, str(door_targets.get(direction, "")), dimensions)
+	var access_direction := doors[0] if not doors.is_empty() else "west"
+	var access_center := Vector3.ZERO
+	match access_direction:
+		"west":
+			access_center = Vector3(-dimensions.x * 0.5, 1.45, 0)
+		"east":
+			access_center = Vector3(dimensions.x * 0.5, 1.45, 0)
+		"north":
+			access_center = Vector3(0, 1.45, -dimensions.y * 0.5)
+		_:
+			access_center = Vector3(0, 1.45, dimensions.y * 0.5)
+	var frame_axis_x := access_direction in ["north", "south"]
+	for side in [-1.0, 1.0]:
+		var frame_half_width := TOWER_GEOMETRY.DOOR_CLEAR_WIDTH_M * 0.5 + 0.22
+		var post_offset := Vector3(side * frame_half_width, 0, 0) if frame_axis_x else Vector3(0, 0, side * frame_half_width)
+		_spawn_prefab("RooftopStairFramePost", ROOFTOP_STAIR_FRAME_POST_PREFAB, access_center + post_offset, Vector3(0.34, 2.9, 0.34), _wall_material)
+	var frame_span := TOWER_GEOMETRY.DOOR_CLEAR_WIDTH_M + 0.78
+	var lintel_size := Vector3(frame_span, 0.38, 0.34) if frame_axis_x else Vector3(0.34, 0.38, frame_span)
+	_spawn_prefab("RooftopStairFrameLintel", ROOFTOP_STAIR_FRAME_LINTEL_PREFAB, access_center + Vector3(0, 1.24, 0), lintel_size, _wall_material)
+	# 楼梯头顶部做缺口标识；真正通行口仍由公共 RoomDoor3D 阻挡与开启。
+	var marker := ROOFTOP_DESCENT_MARKER_PREFAB.instantiate() as Node3D
+	marker.name = "RooftopDescentMarker"
+	marker.position = access_center + Vector3(0, 1.9, 0)
+	var label3d := marker.get_node("RooftopDescentMarker") as Label3D
+	if label3d != null:
+		label3d.text = "下行楼梯"
+		label3d.modulate = theme.accent_color.lightened(0.18)
+	add_child(marker)
+
+
+func _build_rooftop_exterior_wall(direction: String, dimensions: Vector2) -> void:
+	var horizontal := direction in ["north", "south"]
+	var length := dimensions.x if horizontal else dimensions.y
+	var has_door := doors.has(direction)
+	var facade_material := _material(theme.wall_color.lightened(0.14), 0.54, 0.68)
+	var facade_band_material := _material(theme.trim_color.lightened(0.10), 0.70, 0.42)
+	facade_material.emission_enabled = true
+	facade_material.emission = theme.wall_color.lightened(0.24)
+	facade_material.emission_energy_multiplier = 0.28
+	facade_band_material.emission_enabled = true
+	facade_band_material.emission = theme.trim_color.lightened(0.18)
+	facade_band_material.emission_energy_multiplier = 0.46
+	# 立面门洞贯穿本层高度，让上下两端都沿同一门轴进入楼梯间。
+	var opening := TOWER_GEOMETRY.DOOR_CLEAR_WIDTH_M if has_door else 0.0
+	var segment_length := (length - opening) * 0.5 if has_door else length
+	var centers: Array[float] = [0.0]
+	if has_door:
+		centers = [
+			-(opening * 0.5 + segment_length * 0.5),
+			opening * 0.5 + segment_length * 0.5,
+		]
+	for segment_index in range(centers.size()):
+		var segment_center := float(centers[segment_index])
+		var center := Vector3.ZERO
+		if horizontal:
+			center = Vector3(
+				segment_center,
+				-ROOFTOP_FACADE_HEIGHT * 0.5,
+				-dimensions.y * 0.5 if direction == "north" else dimensions.y * 0.5
+			)
+		else:
+			center = Vector3(
+				-dimensions.x * 0.5 if direction == "west" else dimensions.x * 0.5,
+				-ROOFTOP_FACADE_HEIGHT * 0.5,
+				segment_center
+			)
+		var size := (
+			Vector3(segment_length, ROOFTOP_FACADE_HEIGHT, 0.54)
+			if horizontal
+			else Vector3(0.54, ROOFTOP_FACADE_HEIGHT, segment_length)
+		)
+		# 立面是视觉楼体；屋顶边界、门和楼梯间各自承担真实碰撞，避免重复墙体卡人。
+		_spawn_prefab("RooftopExteriorWall_%s" % direction, ROOFTOP_FACADE_PREFAB, center, size, facade_material)
+		for band_y in [-0.72, -5.28]:
+			var band_center := Vector3(center.x, band_y, center.z)
+			var band_size := (
+				Vector3(segment_length, 0.18, 0.62)
+				if horizontal
+				else Vector3(0.62, 0.18, segment_length)
+			)
+			_spawn_prefab("RooftopExteriorBand_%s" % direction, ROOFTOP_FACADE_BAND_PREFAB, band_center, band_size, facade_band_material)
+
+
+func _build_rooftop_railing(direction: String, dimensions: Vector2) -> void:
+	# v0.1：栏杆下梁底贴地板面 Y=0，上梁顶贴 post 顶 Y=1.32，消除“浮空”问问题。
+	const RAIL_THICKNESS := 0.12
+	const POST_HEIGHT := 1.32
+	const RAIL_LOWER_CENTER_Y := RAIL_THICKNESS * 0.5      # 0.06，底边贴地板
+	const RAIL_UPPER_CENTER_Y := POST_HEIGHT - RAIL_THICKNESS * 0.5  # 1.26，顶边贴 post 顶
+	const POST_CENTER_Y := POST_HEIGHT * 0.5                # 0.66，底边贴地板
+	var horizontal := direction in ["north", "south"]
+	var length := dimensions.x if horizontal else dimensions.y
+	var has_door := doors.has(direction)
+	var opening := TOWER_GEOMETRY.DOOR_CLEAR_WIDTH_M if has_door else 0.0
+	var segment_length := (length - opening) * 0.5 if has_door else length
+	var centers: Array[float] = [0.0]
+	if has_door:
+		centers = [
+			-(opening * 0.5 + segment_length * 0.5),
+			opening * 0.5 + segment_length * 0.5,
+		]
+	for segment_index in range(centers.size()):
+		var segment_center := float(centers[segment_index])
+		var center := Vector3.ZERO
+		if horizontal:
+			center = Vector3(segment_center, RAIL_LOWER_CENTER_Y, -dimensions.y * 0.5 if direction == "north" else dimensions.y * 0.5)
+		else:
+			center = Vector3(-dimensions.x * 0.5 if direction == "west" else dimensions.x * 0.5, RAIL_LOWER_CENTER_Y, segment_center)
+		var rail_size := Vector3(segment_length, RAIL_THICKNESS, 0.18) if horizontal else Vector3(0.18, RAIL_THICKNESS, segment_length)
+		_spawn_prefab("RooftopRailLower_%s_%02d" % [direction, segment_index], ROOFTOP_RAIL_LOWER_PREFAB, center, rail_size, _trim_material)
+		var upper_center := center
+		upper_center.y = RAIL_UPPER_CENTER_Y
+		_spawn_prefab("RooftopRailUpper_%s_%02d" % [direction, segment_index], ROOFTOP_RAIL_UPPER_PREFAB, upper_center, rail_size, _trim_material)
+		var post_count := maxi(2, int(segment_length / 4.0) + 1)
+		for post_index in range(post_count):
+			var ratio := float(post_index) / float(maxi(1, post_count - 1))
+			var offset := lerpf(-segment_length * 0.5, segment_length * 0.5, ratio)
+			var post_position := center
+			if horizontal:
+				post_position.x += offset
+			else:
+				post_position.z += offset
+			post_position.y = POST_CENTER_Y
+			_spawn_prefab("RooftopRailPost_%s_%02d_%02d" % [direction, segment_index, post_index], ROOFTOP_RAIL_POST_PREFAB, post_position, Vector3(0.16, POST_HEIGHT, 0.16), _trim_material)
+
+
+func _build_tower_module_shell(dimensions: Vector2) -> void:
+	if (
+		room_type == "FACILITY"
+		and is_equal_approx(dimensions.x, 30.0)
+		and is_equal_approx(dimensions.y, 30.0)
+	):
+		_build_base_facility_shell(dimensions)
+		return
+	if room_type == "STAIR_LOBBY" and _can_build_safe_room_shell(dimensions):
+		_build_safe_room_shell(dimensions)
+		return
+	# v0.1 v2：4 拐角 + 边墙拟合 + 门洞
+	_build_tower_wall_v2(dimensions)
+
+
+## 入口安全房只在 15×15m 塔楼格、且恰好两扇门时才走 v007 单一布局整房旋转。
+## 任何非常规配置一律回退旧拼装，避免把门洞留在没有开门的那面墙上。
+func _can_build_safe_room_shell(dimensions: Vector2) -> bool:
+	if not is_equal_approx(dimensions.x, dimensions.y):
+		return false
+	if not is_equal_approx(dimensions.x, TOWER_GEOMETRY.COMBAT_STAIR_LOBBY_SIZE_M):
+		return false
+	if doors.size() != SAFE_ROOM_DOOR_SIDES.size():
+		return false
+	return _safe_room_rotation_steps() >= 0
+
+
+## v007 正式美术：v004 通用墙/地/门 + 17 个房间包，整房按实际门向旋转。
+## 碰撞策略沿用 v004 组件契约 collision_owner=self：墙与门墙自带的 0.30m 结构碰撞
+## 就是玩法阻挡，本函数不再叠加旧的逐段 0.30m 代理，避免同位置两套静态碰撞。
+## 地砖包与门扇包的内嵌碰撞则必须去掉：楼板承重由 TowerFloorStage3D._build_support()
+## 统一持有，门扇通行由 RoomDoor3D 的升降碰撞持有（见组件自身的 runtime_collision_note）。
+func _build_safe_room_shell(dimensions: Vector2) -> void:
+	var rotation_steps := maxi(0, _safe_room_rotation_steps())
+	var rotation_y := float(rotation_steps) * PI * 0.5
+	var art_root := Node3D.new()
+	art_root.name = "SafeRoomArtRoot"
+	art_root.set_meta("asset_id", SAFE_ROOM_ART_ASSET_ID)
+	art_root.set_meta("asset_version", SAFE_ROOM_ART_VERSION)
+	art_root.set_meta("art_source", "entry_safe_room/%s" % SAFE_ROOM_ART_VERSION)
+	art_root.set_meta("room_orientation_steps", rotation_steps)
+	art_root.set_meta("authoring_note", "v007 单一方位；按本层门向整房旋转，不按方位分版本。")
+	art_root.rotation.y = rotation_y
+	add_child(art_root)
+	# 四角补 L 型墙角（仅远征开启）。L 臂各沿边覆盖 5m，所以开启后每条边两端各 5m
+	# 让位给 L 臂，直墙只留「沿边偏移 = 0」的中段槽位；门洞本来就在中段槽位上，不受影响。
+	var use_corner_l := safe_room_corner_l and _safe_room_corner_layout_fits(dimensions)
+	if safe_room_corner_l and not use_corner_l:
+		push_warning("DungeonRoom3D: 安全房 %s 尺寸 %s 不满足四角 L 件布局，回退 12 段直墙" % [
+			room_id, str(dimensions)
+		])
+	var wall_count := 0
+	var expected_wall_count := 0
+	for slot in SAFE_ROOM_WALL_SLOTS:
+		if use_corner_l and not safe_room_slot_is_edge_middle(slot as Array):
+			continue
+		expected_wall_count += 1
+		if _build_safe_room_wall_slot(art_root, slot as Array, rotation_y):
+			wall_count += 1
+	var corner_count := _spawn_safe_room_corners(dimensions, art_root) if use_corner_l else 0
+	var tile_count := _build_safe_room_floor_tiles(art_root)
+	var package_count := _build_safe_room_packages(art_root)
+	var exit_sign := _build_safe_room_exit_sign(dimensions)
+	# 门扇仍走通用 _build_door：v007 门洞切向中心就是 5m 网格中段（偏移 0），
+	# 与 _build_door 读取的 tower_wall_door_offset_* 默认值一致，门扇正好落在门垛之间。
+	for direction in doors:
+		_build_door(direction, str(door_targets.get(direction, "")), dimensions)
+	set_meta("safe_room_art_version", SAFE_ROOM_ART_VERSION)
+	set_meta("safe_room_orientation_steps", rotation_steps)
+	set_meta("safe_room_corner_l", use_corner_l)
+	set_meta("safe_room_corner_module_count", corner_count)
+	set_meta("safe_room_wall_module_count", wall_count)
+	# 期望值随布局模式变化（12 段直墙 / 4 段中段），写进 meta 让验收按同一口径推导，
+	# 不在验收脚本里硬编码 10 或 12。
+	set_meta("safe_room_wall_expected_count", expected_wall_count)
+	set_meta("safe_room_floor_tile_count", tile_count)
+	set_meta("safe_room_package_count", package_count)
+	set_meta("safe_room_exit_sign", exit_sign != null)
+	set_meta("safe_room_exit_sign_direction", exit_sign.get_meta("exit_sign_direction", "") if exit_sign != null else "")
+	if wall_count != expected_wall_count:
+		push_warning("DungeonRoom3D: 安全房 %s 墙组件缺失 (%d/%d)" % [
+			room_id, wall_count, expected_wall_count
+		])
+	if use_corner_l and corner_count != SAFE_ROOM_CORNER_IDS.size():
+		push_warning("DungeonRoom3D: 安全房 %s 四角 L 件缺失 (%d/%d)" % [
+			room_id, corner_count, SAFE_ROOM_CORNER_IDS.size()
+		])
+
+
+## 四角 L 件布局是否成立：每条边的槽位数与尺寸必须能拆成「L 臂 5m + 中段 5m + L 臂 5m」。
+## 期望边长由清单推出（3 个 5m 槽位 = 15m），不硬编码 15；不成立时退回 12 段直墙，
+## 让「四角补 L」这件事有一条会失败的保护，而不是静默错位。
+func _safe_room_corner_layout_fits(dimensions: Vector2) -> bool:
+	var grid := TOWER_GEOMETRY.GRID_UNIT_M
+	var side_slots := 0
+	for slot in SAFE_ROOM_WALL_SLOTS:
+		if str((slot as Array)[4]) == "north":
+			side_slots += 1
+	if side_slots < 3:
+		return false
+	var side_length := grid * float(side_slots)
+	return (
+		is_equal_approx(dimensions.x, side_length)
+		and is_equal_approx(dimensions.y, side_length)
+	)
+
+
+## 槽位是否落在边的中段（沿边偏移 = 0）。北/南槽位沿 X 铺，东/西槽位沿 Z 铺。
+## 静态：验收脚本要按同一口径推导期望墙数，禁止各自复述一遍判据。
+static func safe_room_slot_is_edge_middle(slot: Array) -> bool:
+	if slot.size() < 5:
+		return false
+	var direction := str(slot[4])
+	var along := float(slot[0]) if direction in ["north", "south"] else float(slot[1])
+	return absf(along) < 0.001
+
+
+## 四角 L 件开启后保留的中段槽位数（= 每条边 1 段，四条边共 4 段）。
+static func safe_room_middle_slot_count() -> int:
+	var count := 0
+	for slot in SAFE_ROOM_WALL_SLOTS:
+		if safe_room_slot_is_edge_middle(slot as Array):
+			count += 1
+	return count
+
+
+## 按「世界角位」直接摆放四角 L 件。
+## 与「原生四角 + art_root 整房旋转」等价：SAFE_ROOM_CORNER_IDS 是 90° 旋转的置换环，
+## 且 _spawn_room_corner 的 rotation_y 与角位一一对应（SW 0° / SE 90° / NE 180° / NW −90°），
+## 两者相加正好等于整房旋转角。这样摆可以让 _configure_corner_camera_collisions()
+## 拿到世界朝向的角 id —— 镜头下压规则按世界南北墙判定，传原生 id 会转错向。
+func _spawn_safe_room_corners(dimensions: Vector2, art_root: Node3D) -> int:
+	var half := dimensions * 0.5
+	var placed := 0
+	for corner_id in SAFE_ROOM_CORNER_IDS:
+		var corner := _spawn_room_corner(
+			_safe_room_corner_position(half, corner_id), corner_id, art_root
+		)
+		if corner != null:
+			placed += 1
+	return placed
+
+
+func _safe_room_corner_position(half: Vector2, corner_id: String) -> Vector2:
+	match corner_id:
+		"NW":
+			return Vector2(-half.x, -half.y)
+		"NE":
+			return Vector2(half.x, -half.y)
+		"SW":
+			return Vector2(-half.x, half.y)
+		_:
+			return Vector2(half.x, half.y)
+
+
+## 解析整房旋转步数：把授权布局的门轴墙集合 {南, 东} 转到本层实际门向集合。
+## 实测 98F→78F 只出现 {东,南}/{西,南}/{东,北}/{西,北} 四种相邻组合，
+## 恰好对应 0/−1/+1/2 步（0°/270°/90°/180°）；无法匹配时返回 -1 并回退旧拼装。
+func _safe_room_rotation_steps() -> int:
+	for step in range(4):
+		var angle := float(step) * PI * 0.5
+		var rotated: Array[String] = []
+		for native_direction in SAFE_ROOM_DOOR_SIDES:
+			rotated.append(_rotated_direction(native_direction, angle))
+		if _same_direction_set(rotated, doors):
+			return step
+	return -1
+
+
+func _rotated_direction(direction: String, angle: float) -> String:
+	var vector := Vector3.ZERO
+	match direction:
+		"north":
+			vector = Vector3(0.0, 0.0, -1.0)
+		"south":
+			vector = Vector3(0.0, 0.0, 1.0)
+		"east":
+			vector = Vector3(1.0, 0.0, 0.0)
+		"west":
+			vector = Vector3(-1.0, 0.0, 0.0)
+		_:
+			return direction
+	var rotated := vector.rotated(Vector3.UP, angle)
+	if absf(rotated.x) >= absf(rotated.z):
+		return "east" if rotated.x > 0.0 else "west"
+	return "south" if rotated.z > 0.0 else "north"
+
+
+func _same_direction_set(a: Array[String], b: Array) -> bool:
+	if a.size() != b.size():
+		return false
+	for direction in a:
+		if direction not in b:
+			return false
+	return true
+
+
+## 一个 5m 墙槽位：门墙（含 2.2×2.5 门洞）或实墙，按槽位角度落在 ±7.5 边界网格线上。
+func _build_safe_room_wall_slot(art_root: Node3D, slot: Array, rotation_y: float) -> bool:
+	if slot.size() < 5:
+		return false
+	var uses_door := bool(slot[3])
+	var native_direction := str(slot[4])
+	var module := (
+		SAFE_ROOM_WALL_DOOR_PREFAB if uses_door else SAFE_ROOM_WALL_STANDARD_PREFAB
+	).instantiate() as Node3D
+	if module == null:
+		push_error("DungeonRoom3D: 安全房 v007 墙组件实例化失败 (%s)" % native_direction)
+		return false
+	module.name = "SafeRoomWall_%s_%s" % [
+		native_direction.capitalize(),
+		"Door" if uses_door else "Solid",
+	]
+	module.position = Vector3(float(slot[0]), 0.0, float(slot[1]))
+	module.rotation.y = deg_to_rad(float(slot[2]))
+	# tower_wall_direction 必须记“整房旋转之后”的世界朝向：TowerDescent3D 的镜头
+	# 探针（_camera_wall_expectation）与塔楼网格验收都按世界朝向读这个 meta。
+	# 授权文件里的原生方位另存 stair_lobby_native_direction，便于回溯 v007 布局。
+	var world_direction := _rotated_direction(native_direction, rotation_y)
+	module.set_meta("tower_wall_direction", world_direction)
+	module.set_meta("stair_lobby_native_direction", native_direction)
+	module.set_meta("grid_unit_m", TOWER_GEOMETRY.GRID_UNIT_M)
+	# 摄像机下墙规则按“旋转之后”的实际世界朝向来标，房内看到的南北墙才正确。
+	_set_camera_lower_wall_on_static_bodies(
+		module,
+		world_direction in ["north", "south"]
+	)
+	_set_geometry_shadow_casting(module, true)
+	module.set_meta("shadow_policy", "cast_and_receive")
+	art_root.add_child(module)
+	if uses_door and world_direction in ["north", "south"]:
+		# 南北向门洞开门后不能留实体碰撞，用 camera-only 门墙代理承接 TowerDescent3D
+		# 的镜头探针，与旧塔楼拼装路径（_build_corner_aware_wall_run）同契约。
+		# 挂在 art_root 下继承整房旋转，所以这里传的是槽位局部变换。
+		_add_camera_only_door_wall_proxy(
+			world_direction,
+			module.position,
+			module.rotation.y,
+			0,
+			art_root
+		)
+	return true
+
+
+## 3×3 棋盘地砖：c01 = (row + col) 偶数的 5 块角/中心砖，c02 = 其余 4 块。
+## 砖面顶面按每个组件自己的 snap_to_walk_plane_offset_m 落到 Y=0：c01 结构厚 0.056、
+## c02 结构厚 0.081，两版厚度不同，不能共用一个硬编码偏移。
+func _build_safe_room_floor_tiles(art_root: Node3D) -> int:
+	var placed := 0
+	for row in range(3):
+		for column in range(3):
+			var uses_c01 := (row + column) % 2 == 0
+			var tile := (
+				SAFE_ROOM_FLOOR_TILE_C01_PREFAB if uses_c01 else SAFE_ROOM_FLOOR_TILE_C02_PREFAB
+			).instantiate() as Node3D
+			if tile == null:
+				push_error("DungeonRoom3D: 安全房 v007 地砖实例化失败 (r%02d_c%02d)" % [
+					row + 1, column + 1
+				])
+				continue
+			tile.name = "SafeRoomFloorTile_R%02d_C%02d" % [row + 1, column + 1]
+			var snap_offset: float = tile.get_meta("snap_to_walk_plane_offset_m", 0.0)
+			tile.position = Vector3(
+				SAFE_ROOM_FLOOR_GRID_M * (float(column) - 1.0),
+				snap_offset,
+				SAFE_ROOM_FLOOR_GRID_M * (float(row) - 1.0)
+			)
+			tile.set_meta("walk_plane_snap_y", snap_offset)
+			_disable_static_collision_descendants(tile)
+			art_root.add_child(tile)
+			placed += 1
+	return placed
+
+
+## 17 个房间包逐件实例化。摆位不在脚本里硬编码：每个包的 PackedScene 根节点都带
+## room_placement_position 元数据（范式 B 契约），y 统一减去行走面高差即可落到 Y=0。
+func _build_safe_room_packages(art_root: Node3D) -> int:
+	var placed := 0
+	for package_id in SAFE_ROOM_PACKAGE_IDS:
+		# 路径恒定契约：运行资产不含版本号（版本事实在 metadata/asset_version 与台账）。
+		var scene_path := "%sentry_safe_room/%s/%s_root_top3d.tscn" % [
+			SAFE_ROOM_RUNTIME_ROOT,
+			package_id,
+			package_id,
+		]
+		if not ResourceLoader.exists(scene_path):
+			push_warning("DungeonRoom3D: 安全房 v007 缺少房间包 %s" % scene_path)
+			continue
+		var packed := load(scene_path) as PackedScene
+		if packed == null:
+			push_error("DungeonRoom3D: 安全房 v007 房间包无法加载 %s" % scene_path)
+			continue
+		var package := packed.instantiate() as Node3D
+		if package == null:
+			push_error("DungeonRoom3D: 安全房 v007 房间包根节点必须是 Node3D: %s" % scene_path)
+			continue
+		package.name = "SafeRoomPackage_%s" % package_id
+		var placement: Vector3 = package.get_meta("room_placement_position", Vector3.ZERO)
+		package.position = Vector3(
+			placement.x,
+			placement.y - SAFE_ROOM_WALK_LIFT_M,
+			placement.z
+		)
+		package.set_meta("room_package_id", package_id)
+		art_root.add_child(package)
+		placed += 1
+	return placed
+
+
+## 退出门（door_targets 该侧为空串 = 封闭抵达门 /「[E] 退出战局」门）内侧地面，
+## 平铺一枚 EXIT 霓虹灯标牌：发光面朝上、长边平行门洞，提示玩家这扇门是出去用的。
+## 为什么挂房间根而不是 art_root：位置与朝向全部按**世界门向**推导（与 _build_door 同口径），
+## 挂到会整房旋转 0/90/180/270° 的 art_root 下反而要反算回原生方位。
+## 局部原点在「底面中心」⇒ 绕 X +90° 放平后底边落在原点，必须抬高半个厚度才能让背面贴地。
+##
+## 两条调用路径（**都走世界门向，与静态布局的烘焙朝向无关**，所以位置天然一致）：
+##   ① 塔楼/程序化安全房 → `_build_safe_room_shell()`
+##   ② 远征01 入口房（`room_id == "start"`）→ 走静态布局 TSCN，`_build_shell()` 静态分支提前
+##      return、**不经过** `_build_safe_room_shell()` ⇒ 必须在那里单独补一次。
+## 幂等：已存在同名节点即复用，两条路径不会各摆一块。
+func _build_safe_room_exit_sign(dimensions: Vector2) -> Node3D:
+	var existing := get_node_or_null(SAFE_ROOM_EXIT_SIGN_NODE_NAME) as Node3D
+	if existing != null:
+		return existing
+	var direction := _safe_room_retreat_direction()
+	if direction.is_empty():
+		push_warning("DungeonRoom3D: 安全房 %s 找不到退出门，跳过 EXIT 标牌" % room_id)
+		return null
+	var node := SAFE_ROOM_EXIT_SIGN_PREFAB.instantiate() as Node3D
+	if node == null:
+		push_error("DungeonRoom3D: EXIT 标牌根节点必须是 Node3D")
+		return null
+	var normal := _direction_normal(direction)
+	var half := minf(dimensions.x, dimensions.y) * 0.5
+	var offset := half - SAFE_ROOM_EXIT_SIGN_INSET_M - SAFE_ROOM_EXIT_SIGN_DEPTH_M
+	node.name = SAFE_ROOM_EXIT_SIGN_NODE_NAME
+	var walk_surface_y := float(get_meta("walk_surface_y_m", 0.0))
+	# 远征02 静态砖面的真实走行面是 Y=0.30；其它安全房保持历史 Y=0 口径。
+	node.position = normal * offset + Vector3(
+		0.0, walk_surface_y + SAFE_ROOM_EXIT_SIGN_HALF_THICKNESS_M, 0.0
+	)
+	# YXZ 欧拉序：Rx(90°) 把竖立门头姿态放平、发光面朝上；Ry(yaw) 再把深度方向对准门法向。
+	node.rotation = Vector3(PI * 0.5, _direction_yaw(direction), 0.0)
+	node.set_meta("exit_sign_direction", direction)
+	node.set_meta("exit_sign_asset_id", SAFE_ROOM_EXIT_SIGN_ASSET_ID)
+	add_child(node)
+	return node
+
+
+## 退出门 = door_targets 该侧为空串的那扇（口径见 2026-10-12「入口安全房不再默认掉钥匙」）。
+func _safe_room_retreat_direction() -> String:
+	for direction in doors:
+		if str(door_targets.get(direction, "")).is_empty():
+			return str(direction)
+	return ""
+
+
+## 世界方位 → 门外法向单位向量（水平）。
+func _direction_normal(direction: String) -> Vector3:
+	match direction:
+		"north":
+			return Vector3(0.0, 0.0, -1.0)
+		"south":
+			return Vector3(0.0, 0.0, 1.0)
+		"east":
+			return Vector3(1.0, 0.0, 0.0)
+		"west":
+			return Vector3(-1.0, 0.0, 0.0)
+	return Vector3.ZERO
+
+
+## 世界方位 → 让标牌深度方向（Rx 90° 后的本地 +Y）对准该门法向所需的 Ry 偏航角。
+func _direction_yaw(direction: String) -> float:
+	match direction:
+		"north":
+			return PI
+		"east":
+			return PI * 0.5
+		"west":
+			return -PI * 0.5
+	return 0.0
+
+
+## 关掉一件美术包自带的静态碰撞。用于两类去重：地砖（楼板承重归 TowerFloorStage3D）
+## 与门扇（通行归 RoomDoor3D 的升降碰撞）。只关碰撞层与形状，不删节点，便于运行时排查。
+func _disable_static_collision_descendants(root: Node) -> void:
+	for value in root.find_children("*", "StaticBody3D", true, false):
+		var body := value as StaticBody3D
+		if body == null:
+			continue
+		body.collision_layer = 0
+		body.collision_mask = 0
+		body.set_meta("collision_deduped_by", "DungeonRoom3D")
+		for shape_value in body.find_children("*", "CollisionShape3D", true, false):
+			var shape := shape_value as CollisionShape3D
+			if shape != null:
+				shape.disabled = true
+
+
+## —— 授权布局壳体装配（2026-09-20，区块00 主人的办公室 98F）——
+##
+## 输入是外部摆位源逐房导出的 5m 组件实例清单（房间局部坐标）。本函数只做四件事：
+##   ① 组件实例化（L 角件 / 实墙 / 门墙 / 地砖），位置与朝向一律取清单值，不重算；
+##   ② **门槽顶替**：清单里坐在「门墙面上 + 沿墙偏移 = 门槽」的实墙，自动换成门墙。
+##      门槽的唯一口径是 _plan_room_layout() 写进本节点的 tower_wall_door_offset_<side>，
+##      不在清单里另存一份 —— 否则布线一改，门扇与门洞就会静默错位。
+##   ③ 地砖关掉内嵌静态碰撞（承重归 TowerFloorStage3D._build_support()）；
+##   ④ 仍然用 _build_door() 生成本房通行门（开合与升降碰撞归 RoomDoor3D）。
+##
+## 不生成的东西：4 面程序化墙、角柱、地板、天花、安全房 v007 整房、房间包。
+func _build_authored_layout_shell(dimensions: Vector2) -> void:
+	var art_root := Node3D.new()
+	art_root.name = "AuthoredLayoutArtRoot"
+	art_root.set_meta("asset_id", authored_layout_asset_id)
+	art_root.set_meta("asset_version", authored_layout_version)
+	art_root.set_meta("authored_room_id", authored_layout_room_id)
+	art_root.set_meta("authored_layout_shell", true)
+	art_root.set_meta("layout_instance_total", authored_layout_instances.size())
+	add_child(art_root)
+
+	var half := dimensions * 0.5
+	var corner_count := 0
+	var solid_count := 0
+	var door_wall_count := 0
+	var tile_count := 0
+	var exclusive_count := 0
+	var multi_level_count := 0
+	var room_type_component_count := 0
+	var promoted: Array[String] = []
+	var unresolved: Array[String] = []
+	# 墙件台账（side / 沿墙偏移 / 是否门墙）。**在实例循环里精确采集**，不复扫节点树：
+	# 节点树里混着 _add_camera_only_door_wall_proxy() 生成的 camera-only 代理件，
+	# 它带 tower_wall_direction 却不是门墙组件，反扫会把它算成「门槽上坐着实墙」而假红。
+	var authored_wall_records: Array = []
+	for value in authored_layout_instances:
+		var instance := value as Dictionary
+		var role := str(instance.get("slot_role", ""))
+		var local_position := instance.get("position", Vector3.ZERO) as Vector3
+		if authored_layout_asset_id == "ENV-BATTLE-BLOCK00-ART-LAYOUT-3D" and str(instance.get("name", "")) == "DOORWALL_east_xp20_p2.5":
+			continue
+		match role:
+			"corner_l":
+				# 复用塔楼正式角件路径（远征四角 L 件也是这条），
+				# 它负责 tower_wall_corner / 镜头下压臂两条契约。必须挂进
+				# AuthoredLayoutArtRoot：静态房间导出只固化这个根的子树；若默认
+				# 挂到 DungeonRoom3D 根，非矩形房的凸角会在编辑器静态场景中丢失。
+				_spawn_room_corner(
+					Vector2(local_position.x, local_position.z),
+					str(instance.get("corner_id", "SW")),
+					art_root,
+					str(instance.get("name", ""))
+				)
+				corner_count += 1
+			"solid_wall", "door_wall":
+				# 房型 Blender 源的墙原点按整樘 bbox 中心记录，会比结构外轮廓内缩
+				# 约 0.16~0.24m；不能沿用历史通用壳体的 0.01m 精确边界判据。
+				# 先由位置确定墙属于哪一侧，再判断该 lane 是否是本局真实门槽。
+				var wall_side := _authored_wall_side_from_position(local_position, half)
+				if wall_side.is_empty():
+					wall_side = _authored_wall_direction(
+						float(instance.get("rotation_y_deg", 0.0))
+					)
+				var connection_side := _authored_wall_connection_side(local_position, half)
+				# 共墙的非所有者端不再生成第二面墙：父端已经拥有唯一门墙、门扇和碰撞。
+				# 该槽从本房壳体中移除，随后绑定父端的同一个 RoomDoor3D。
+				if not connection_side.is_empty() and not owns_door_endpoint(connection_side):
+					continue
+				var door_side := _authored_wall_door_side(local_position, half)
+				# 门位**只认本局真实门槽车道**（tower_wall_door_offset_<side>），不认摆位源
+				# 的 `slot_role=door_wall`：房型源按规范「不冻结门位」，它的门墙件只是摆在自己
+				# 的建档位置（办公室那件落在 north x=+2.5，而本关 room_03 的 north 门槽在
+				# x=-2.5）。若在这里认 role，那件非门位的墙会被当成门墙换掉，凭空造出一个
+				# 没有门扇的假门洞；它自身几何是实体，当普通墙渲染才不会漏光。
+				var uses_door := not door_side.is_empty()
+				if not _spawn_authored_layout_wall(
+					art_root, instance, uses_door, wall_side, role == "solid_wall" and uses_door
+				):
+					unresolved.append(str(instance.get("name", "")))
+					continue
+				# 两块旧北墙继续拥有边界碰撞，仅替换其视觉为独立破墙组件。
+				if authored_layout_asset_id == "ENV-BATTLE-BLOCK00-ART-LAYOUT-3D" and str(instance.get("name", "")) in ["WALL_north_yp10_m32.5", "WALL_north_yp10_m27.5"]:
+					for piece in art_root.get_children():
+						if piece is Node3D and (piece as Node3D).position.distance_to(local_position) < 0.1:
+							_hide_replaced_block00_wall_visuals(piece)
+				# 沿墙偏移：南北向墙取局部 x、东西向墙取局部 z —— 与
+				# _authored_wall_door_side() 读 tower_wall_door_offset_<side> 的坐标系一致。
+				var wall_along := local_position.z
+				var wall_depth := local_position.x
+				if wall_side in ["north", "south"]:
+					wall_along = local_position.x
+					wall_depth = local_position.z
+				authored_wall_records.append({
+					"side": wall_side,
+					"along": wall_along,
+					"depth": wall_depth,
+					"uses_door": uses_door,
+				})
+				if uses_door:
+					door_wall_count += 1
+					if role == "solid_wall":
+						promoted.append("%s@%s" % [str(instance.get("name", "")), door_side])
+				else:
+					solid_count += 1
+			"floor_tile":
+				if _spawn_authored_layout_floor_tile(art_root, instance):
+					tile_count += 1
+				else:
+					unresolved.append(str(instance.get("name", "")))
+			"exclusive_component":
+				# Boss 房专属件（地板底板 / 主屏 / 粗重桥架 / 北墙标识 / 南地标附件 / 碎屑）。
+				# 与前三类的根本差别：坐标是**完整的 Vector3**，y 是设计悬空高度（主屏 3.805m、
+				# 北墙标识 7.4461m），绝不能像落地件那样把 y 归一到 0，否则全砸在地上。
+				if _spawn_authored_layout_exclusive(art_root, instance):
+					exclusive_count += 1
+				else:
+					unresolved.append(str(instance.get("name", "")))
+			"multi_level_component":
+				# 多层几何件（旧程序化通道桥）：只为尚未接入 v007 房型源的历史布局保留。
+				if _spawn_authored_multi_level(art_root, instance):
+					multi_level_count += 1
+				else:
+					unresolved.append(str(instance.get("name", "")))
+			"room_type_component":
+				# 02 房型组件默认布局中的普通构件。完整 Vector3/scale 来自 Blender 实例清单；
+				# 碰撞责任由各 PackedScene 自己的 metadata/collision_policy 决定。
+				if _spawn_authored_room_type_component(art_root, instance):
+					room_type_component_count += 1
+				else:
+					unresolved.append(str(instance.get("name", "")))
+			_:
+				# door_leaf_preview 等编辑器预览件在导出层已被剔除；漏到这里只可能是
+				# 摆位源加了新角色而没人接线 —— 报警而不是静默丢掉。
+				push_warning(
+					"DungeonRoom3D: 授权布局 %s 出现未接线的 slot_role=%s（实例 %s）"
+					% [room_id, role, str(instance.get("name", ""))]
+				)
+
+	# 通行门：与程序化路径同一实现，门偏移读同一个 tower_wall_door_offset_* 口径。
+	for direction in doors:
+		_build_door(direction, str(door_targets.get(direction, "")), dimensions)
+
+	# 每扇门都必须有一条门墙组件承接门洞；缺了就是「门开在实墙上」——
+	# 这是几何/门槽校验都查不出的隐形契约，必须有一条会失败的断言盯住。
+	#
+	# 但授权布局（区块00 / 远征 13 房）的房间之间是**相邻共墙**：摆位源的 lane 归属模型
+	# 规定「同一 lane 全局只出一个实例」，一道共享墙只归声明它的那个房间。于是邻房那一侧
+	# 的门墙不在本房子树里 —— 门洞由持有该墙的邻房提供。
+	#
+	# 所以判据**必须按 lane 粒度，不能按 side 粒度**：本房某一侧完全可能同时存在
+	# 「门槽 lane（那道墙归邻房）＋ 别的 lane 的实墙」。按 side 判会把这侧的合法委派
+	# 误判成「门开在实墙上」—— 远征 13 房实测稳定 4 条假红（room_03.south /
+	# room_04.east / room_06.east / branch_01.north），而区块级探针已证门槽覆盖正确。
+	#   · 本房该侧有墙件正坐在门槽 lane 上 ⇒ 必须是门墙；是实墙就是真「门开在实墙上」，报错；
+	#   · 本房该侧没有任何墙落在门槽 lane 上 ⇒ 墙归邻房，本房不重复建门墙、不报错，
+	#     只把「该门洞已委派给邻房」记成事实，交区块级探针全局核对覆盖。
+	#
+	# 门槽 lane 的唯一口径仍是 _plan_room_layout() 写进本节点的 tower_wall_door_offset_<side>
+	#（与 _authored_wall_door_side() 同源）。墙件位置取 authored_wall_records 里采集的
+	# 局部坐标，不反扫节点树（树里混着 camera-only 代理件，反扫会假红）。
+	var door_wall_sides: Array[String] = []
+	var wall_sides: Array[String] = []
+	for record_value in authored_wall_records:
+		var record := record_value as Dictionary
+		var record_side := str(record.get("side", ""))
+		if record_side.is_empty():
+			continue
+		if record_side not in wall_sides:
+			wall_sides.append(record_side)
+		if bool(record.get("uses_door", false)) and record_side not in door_wall_sides:
+			door_wall_sides.append(record_side)
+	var delegated_sides: Array[String] = []
+	for direction in doors:
+		var door_offset := float(get_meta("tower_wall_door_offset_%s" % direction, 0.0))
+		match classify_door_lane(
+			authored_wall_records, direction, door_offset, door_plane_depth(direction, half)
+		):
+			"door_wall":
+				continue
+			"solid_wall":
+				push_error(
+					"DungeonRoom3D: 授权布局 %s 的 %s 门没有对应门墙组件（门槽 lane 上坐的是实墙）"
+					% [room_id, direction]
+				)
+			_:
+				delegated_sides.append(direction)
+	# 委派出去的门洞不建门扇面板：邻房已经建了一扇，两扇同面重叠会 z-fighting。
+	# 只藏面板 —— 门节点、升降碰撞、交互提示全部保留，两侧都仍能按 E 开启；
+	# 且一条边的两扇门由 _refresh_edge_visuals 同时开合，状态不会分叉。
+	for direction in delegated_sides:
+		# 数据库房 v014 没有自有 door_wall，门位由通用壳体独占承接；
+		# 不能把两侧都当成共墙委派而同时隐藏门扇，否则独立验收房间中会没有可见门。
+		var common_shell_owns_door := (
+			authored_layout_asset_id.begins_with("ENV-EXPEDITION-L01-DB-")
+			or authored_layout_asset_id.begins_with("ENV-EXPEDITION-L01-CORRIDOR-")
+		)
+		if common_shell_owns_door and door_wall_sides.is_empty():
+			continue
+		var delegated_door := get_door_node(direction)
+		if delegated_door == null:
+			continue
+		var panel := delegated_door.get_node_or_null("DoorPanel") as Node3D
+		if panel != null:
+			panel.visible = false
+		delegated_door.set_meta("authored_shared_door_delegated", true)
+		delegated_door.set_meta("authored_shared_door_owner_side", true)
+	set_meta("authored_layout_door_wall_sides", door_wall_sides)
+	set_meta("authored_layout_wall_sides", wall_sides)
+	set_meta("authored_layout_delegated_door_sides", delegated_sides)
+
+	set_meta("authored_layout_shell", true)
+	set_meta("authored_layout_asset_id", authored_layout_asset_id)
+	set_meta("authored_layout_version", authored_layout_version)
+	set_meta("authored_layout_room_id", authored_layout_room_id)
+	set_meta("authored_layout_corner_count", corner_count)
+	set_meta("authored_layout_solid_wall_count", solid_count)
+	set_meta("authored_layout_door_wall_count", door_wall_count)
+	set_meta("authored_layout_floor_tile_count", tile_count)
+	set_meta("authored_layout_exclusive_count", exclusive_count)
+	set_meta("authored_layout_multi_level_count", multi_level_count)
+	set_meta("authored_layout_room_type_component_count", room_type_component_count)
+	set_meta("authored_layout_promoted_walls", promoted)
+	set_meta("authored_layout_unresolved_instances", unresolved)
+	if not unresolved.is_empty():
+		push_error(
+			"DungeonRoom3D: 授权布局 %s 有 %d 件组件无法解析，房型拼装不完整：%s"
+			% [room_id, unresolved.size(), str(unresolved)]
+		)
+
+
+## 门槽 lane 归属判定（**纯函数**，供 _build_authored_layout_shell 与单测共用）。
+## 输入是本房墙件台账（`{side, along, depth, uses_door}`，见 _build_authored_layout_shell 采集处），
+## 返回三态字符串：
+##   · "door_wall"  —— 本房该侧门槽 lane 上坐的是门墙，门洞由本房承接；
+##   · "solid_wall" —— 门槽 lane 上坐的是实墙 ⇒ 真「门开在实墙上」，调用方必须报错；
+##   · ""           —— 本房该侧没有任何墙落在门槽 lane 上 ⇒ 墙归邻房（共墙 lane 唯一归属），
+##                     本房委派该门洞，不建门墙也不报错。
+##
+## `door_depth` 是门槽所在**墙平面**到房间中心的法向距离（南北墙取局部 z、东西墙取局部 x）。
+## 判据必须同时比 `along` 与 `depth`：轮廓房（L 形 / U 形）同一侧会有**多条平行边界段**
+## —— 凹口的内墙与外边墙可能落在同一个沿墙偏移上（实测远征 seed 77001199 的 branch_01：
+## 北侧外边 y=−15 上开门，凹口内墙 y=−40 上有一件实墙，两者局部 x 都 = 0）。
+## 只比 `along` 会把那件凹口实墙当成「门槽上坐着实墙」而假红。
+##
+## ⚠️ 抽成纯函数是为了让「真错位」这条安全网可被单测钉住 —— 它按构造在正常布局下
+## 永不触发（落在门槽上的实墙会被提升成门墙），无法靠跑关卡来验证它还活着。
+## 判据是 `(side, along, depth)` 三元组，单测 `probe_door_lane_guard` 把三态与边界打全。
+static func classify_door_lane(
+	wall_records: Array, side: String, door_offset: float, door_depth: float
+) -> String:
+	var has_door_wall := false
+	var has_solid_wall := false
+	for record_value in wall_records:
+		if not (record_value is Dictionary):
+			continue
+		var record := record_value as Dictionary
+		if str(record.get("side", "")) != side:
+			continue
+		if absf(float(record.get("along", 0.0)) - door_offset) > DOOR_LANE_GUARD_TOLERANCE_M:
+			continue
+		if absf(float(record.get("depth", 0.0)) - door_depth) > DOOR_LANE_GUARD_TOLERANCE_M:
+			continue
+		if bool(record.get("uses_door", false)):
+			has_door_wall = true
+		else:
+			has_solid_wall = true
+	if has_door_wall:
+		return "door_wall"
+	if has_solid_wall:
+		return "solid_wall"
+	return ""
+
+
+## 某门向的墙平面法向距离（= 该侧包围盒半宽；门恒开在包围盒外边，见
+## `RoomShellLayoutBuilder3D._room_port_lane_key_sets()`）。
+## ⚠ 第二参数是**半跨度**（调用点传 `dimensions * 0.5`），不是整边长；
+## 返回值与装配台账 `authored_wall_records[].depth` 同一坐标系（南北墙取局部 z、东西墙取局部 x）。
+static func door_plane_depth(side: String, half: Vector2) -> float:
+	match side:
+		"north":
+			return -half.y
+		"south":
+			return half.y
+		"west":
+			return -half.x
+		_:
+			return half.x
+
+
+## 授权墙件是否正好坐在本房某扇门的位置上（门槽唯一口径 = tower_wall_door_offset_<side>）。
+## 返回命中的门向，未命中返回 ""。
+static func _authored_wall_side_from_position(
+	local_position: Vector3, half: Vector2
+) -> String:
+	var distances := {
+		"east": absf(local_position.x - half.x),
+		"west": absf(local_position.x + half.x),
+		"north": absf(local_position.z + half.y),
+		"south": absf(local_position.z - half.y),
+	}
+	var best_side := ""
+	var best_distance := INF
+	for side in distances:
+		var distance := float(distances[side])
+		if distance < best_distance:
+			best_side = str(side)
+			best_distance = distance
+	return best_side if best_distance <= DOOR_LANE_GUARD_TOLERANCE_M else ""
+
+
+func _authored_wall_door_side(local_position: Vector3, half: Vector2) -> String:
+	var wall_side := _authored_wall_connection_side(local_position, half)
+	if wall_side.is_empty() or not owns_door_endpoint(wall_side):
+		return ""
+	return wall_side
+
+
+func _authored_wall_connection_side(local_position: Vector3, half: Vector2) -> String:
+	var wall_side := _authored_wall_side_from_position(local_position, half)
+	if wall_side.is_empty() or wall_side not in doors:
+		return ""
+	var along := float(get_meta("tower_wall_door_offset_%s" % wall_side, 0.0))
+	var wall_along := local_position.x if wall_side in ["north", "south"] else local_position.z
+	if absf(wall_along - along) <= DOOR_LANE_GUARD_TOLERANCE_M:
+		return wall_side
+	return ""
+
+
+## 摆位源组件 ID → 运行时 PackedScene。**注册表驱动**：ID 与 prefab 路径全部来自
+## res://assets/art/environments/tower_zones/shared/runtime/shell_component_catalog.json，
+## 本函数只做「查表 + 加载」—— 加一件通用件是改 JSON，不是改这里。
+##
+## 四条口径（都是「不静默」）：
+##   ① 注册表缺失 / 空 / 非 JSON 对象 / schema 不符 → 报错并返回空表；
+##   ② 条目缺 prefab_path / ID 重复登记 → 报错并跳过该条（不留半张表）；
+##   ③ 未登记的 ID → 返回 null，调用方报错，**绝不回退成别的组件**；
+##   ④ 登记了路径但文件不在 / 加载不出 PackedScene → 报错并返回 null，不悄悄跳过。
+##
+## 同一件组件有两个 ID：`component_id`（通用件名，ENV-SHARED-GENERIC-*）与
+## `aliases`（具体批次号，ENV-BATTLE-COMMON-* / ENV-TOWER-*）。两侧任写其一都命中，
+## 且命中同一个 prefab —— 战区摆位源可以继续用批次号，新摆位源可以直接用通用件名。
+const SHELL_COMPONENT_CATALOG_PATH := (
+	"res://assets/art/environments/tower_zones/shared/runtime/shell_component_catalog.json"
+)
+const SHELL_COMPONENT_CATALOG_SCHEMA := "shellstorm2.runtime_shell_component_catalog.v001"
+## 组件 ID → prefab 路径。static 缓存：整局只读一次盘（含失败的那一次，不反复刷屏）。
+static var _shell_component_prefab_paths: Dictionary = {}
+static var _shell_component_catalog_attempted := false
+
+
+static func _load_shell_component_catalog() -> Dictionary:
+	if _shell_component_catalog_attempted:
+		return _shell_component_prefab_paths
+	_shell_component_catalog_attempted = true
+	if not FileAccess.file_exists(SHELL_COMPONENT_CATALOG_PATH):
+		push_error("DungeonRoom3D: 通用壳体组件注册表缺失 %s" % SHELL_COMPONENT_CATALOG_PATH)
+		return _shell_component_prefab_paths
+	var text := FileAccess.get_file_as_string(SHELL_COMPONENT_CATALOG_PATH)
+	if text.is_empty():
+		push_error("DungeonRoom3D: 通用壳体组件注册表为空 %s" % SHELL_COMPONENT_CATALOG_PATH)
+		return _shell_component_prefab_paths
+	var parsed: Variant = JSON.parse_string(text)
+	if not (parsed is Dictionary):
+		push_error("DungeonRoom3D: 通用壳体组件注册表不是 JSON 对象 %s" % SHELL_COMPONENT_CATALOG_PATH)
+		return _shell_component_prefab_paths
+	var catalog := parsed as Dictionary
+	if str(catalog.get("schema", "")) != SHELL_COMPONENT_CATALOG_SCHEMA:
+		push_error(
+			"DungeonRoom3D: 通用壳体组件注册表 schema 不匹配（期望 %s，实得 %s）"
+			% [SHELL_COMPONENT_CATALOG_SCHEMA, str(catalog.get("schema", ""))]
+		)
+		return _shell_component_prefab_paths
+	var entries: Array = catalog.get("components", [])
+	for value in entries:
+		if not (value is Dictionary):
+			push_error("DungeonRoom3D: 通用壳体组件注册表有条目不是 JSON 对象，已跳过")
+			continue
+		var entry := value as Dictionary
+		var component_id := str(entry.get("component_id", ""))
+		var prefab_path := str(entry.get("prefab_path", ""))
+		if prefab_path.is_empty():
+			push_error("DungeonRoom3D: 通用壳体组件注册表条目缺 prefab_path（%s）" % component_id)
+			continue
+		var ids: Array[String] = []
+		ids.append(component_id)
+		var alias_list: Array = entry.get("aliases", [])
+		for alias_value in alias_list:
+			ids.append(str(alias_value))
+		for key in ids:
+			if key.is_empty():
+				push_error("DungeonRoom3D: 通用壳体组件注册表出现空 ID（%s）" % component_id)
+				continue
+			if _shell_component_prefab_paths.has(key):
+				push_error(
+					"DungeonRoom3D: 通用壳体组件注册表 ID 重复登记 %s（同一 ID 只能有一个 prefab）"
+					% key
+				)
+				continue
+			_shell_component_prefab_paths[key] = prefab_path
+	return _shell_component_prefab_paths
+
+
+static func _authored_component_prefab(component_id: String) -> PackedScene:
+	var prefab_path := str(_load_shell_component_catalog().get(component_id, ""))
+	if prefab_path.is_empty():
+		return null
+	if not ResourceLoader.exists(prefab_path):
+		push_error(
+			"DungeonRoom3D: 通用壳体组件 %s 的 prefab 文件不在（%s）" % [component_id, prefab_path]
+		)
+		return null
+	var packed := load(prefab_path) as PackedScene
+	if packed == null:
+		push_error(
+			"DungeonRoom3D: 通用壳体组件 %s 的 prefab 无法加载为 PackedScene（%s）"
+			% [component_id, prefab_path]
+		)
+	return packed
+
+
+## 摆位源 rotation_z_deg → 世界门向。与摆位源 face_in_rotation_deg 互逆：
+## 0°=南墙、180°=北墙、−90°=西墙、90°=东墙。塔楼网格验收按 tower_wall_direction
+## 找门墙，方向标签错了会直接把「门开在实墙上」判成通过。
+static func _authored_wall_direction(rotation_y_deg: float) -> String:
+	var wrapped := fposmod(rotation_y_deg, 360.0)
+	if is_zero_approx(wrapped):
+		return "south"
+	if is_equal_approx(wrapped, 180.0):
+		return "north"
+	if is_equal_approx(wrapped, 90.0):
+		return "east"
+	if is_equal_approx(wrapped, 270.0):
+		return "west"
+	return ""
+
+
+func _spawn_authored_layout_wall(
+	art_root: Node3D,
+	instance: Dictionary,
+	uses_door: bool,
+	wall_side: String,
+	promoted_from_solid: bool
+) -> bool:
+	var component_id := str(instance.get("component_id", ""))
+	# v007 的 WALL_X670 曾误以门洞墙 wall_north_-1 作为 18 个普通墙槽位的视觉母版。
+	# 非门槽统一换现有通用实墙；真实门槽仍由门墙组件接管，避免不可通行处出现假门。
+	var resolved_id := (
+		GENERIC_SOLID_WALL_ID
+		if component_id == BRIDGE_DOOR_VISUAL_WALL_ID and not uses_door
+		else component_id
+	)
+	# 门墙与实墙走同一条注册表解析路径。房型源可声明自己的门墙组件；历史通用壳体
+	# 未声明时仍回退 DOOR_WALL_COMPONENT_ID。实墙在门槽上被提升时只替换为同房型门墙，
+	# 避免办公室正式墙面混入旧通用门墙。
+	if uses_door:
+		resolved_id = str(instance.get("door_wall_component_id", ""))
+		if resolved_id.is_empty():
+			resolved_id = DOOR_WALL_COMPONENT_ID
+	var prefab := _authored_component_prefab(resolved_id)
+	if prefab == null:
+		push_error(
+			"DungeonRoom3D: 授权布局 %s 没有组件 %s 的 prefab 映射（实例 %s）"
+			% [room_id, resolved_id, str(instance.get("name", ""))]
+		)
+		return false
+	var module := prefab.instantiate() as Node3D
+	if module == null:
+		push_error("DungeonRoom3D: 授权墙组件实例化失败（%s）" % component_id)
+		return false
+	module.name = str(instance.get("name", "AuthoredWall"))
+	var rotation_y_deg := float(instance.get("rotation_y_deg", 0.0))
+	# 门墙替换后不能沿用源实墙的局部轴角度：办公室 wall_t615 与门墙、桥房 wall_x780
+	# 与通用门墙的局部长轴相差 90°。最终门墙统一按已解析的墙 side 对齐门扇平面。
+	if uses_door:
+		rotation_y_deg = 0.0 if wall_side in ["north", "south"] else 90.0
+	module.position = instance.get("position", Vector3.ZERO) as Vector3
+	if uses_door:
+		module.position.y = 0.0
+	module.rotation.y = deg_to_rad(rotation_y_deg)
+	module.scale = instance.get("scale", Vector3.ONE) as Vector3
+	var world_direction := wall_side
+	if world_direction.is_empty():
+		world_direction = _authored_wall_direction(rotation_y_deg)
+	if world_direction.is_empty():
+		push_error(
+			"DungeonRoom3D: 授权墙 %s 无法解析所在墙向（rotation_y_deg=%s）"
+			% [module.name, str(rotation_y_deg)]
+		)
+	module.set_meta("tower_wall_direction", world_direction)
+	module.set_meta("grid_unit_m", TOWER_GEOMETRY.GRID_UNIT_M)
+	module.set_meta("authored_component_id", resolved_id)
+	module.set_meta("authored_source_component_id", component_id)
+	if uses_door:
+		module.set_meta("authored_door_wall_promoted", promoted_from_solid)
+	_set_camera_lower_wall_on_static_bodies(
+		module, world_direction in ["north", "south"]
+	)
+	_set_geometry_shadow_casting(module, true)
+	module.set_meta("shadow_policy", "cast_and_receive")
+	# 墙皮也可声明为 solid_wall，不能仅在 room_type_component 分支裁门洞。
+	_apply_authored_room_type_wall_door_collision(module, get_dimensions() * 0.5, module.transform)
+	art_root.add_child(module)
+	if uses_door and world_direction in ["north", "south"]:
+		# 南北向门洞开门后不能留实体碰撞：与安全房 v007 同契约，补 camera-only 代理。
+		_add_camera_only_door_wall_proxy(
+			world_direction, module.position, module.rotation.y, 0, art_root
+		)
+	return true
+
+
+static func _runtime_floor_tile_component_id(
+	source_component_id: String, local_position: Vector3
+) -> String:
+	var replaceable := (
+		source_component_id in [OFFICE_DARK_FLOOR_TILE_ID, BRIDGE_DARK_UPPER_TILE_ID]
+		or source_component_id.begins_with(BOSS_DARK_FLOOR_TILE_PREFIX)
+		or source_component_id.begins_with(DB_DARK_FLOOR_TILE_PREFIX)
+		or source_component_id.begins_with(CORRIDOR_DARK_FLOOR_TILE_PREFIX)
+	)
+	if not replaceable:
+		return source_component_id
+	# 与 RoomShellLayoutBuilder3D 相同的 5m 棋盘规则；只替换主层视觉，桥房坑底砖不经过此分支。
+	var grid_x := roundi((local_position.x - 2.5) / TOWER_GEOMETRY.GRID_UNIT_M)
+	var grid_z := roundi((local_position.z - 2.5) / TOWER_GEOMETRY.GRID_UNIT_M)
+	return (
+		FLOOR_TILE_C01_COMPONENT_ID
+		if absi(grid_x + grid_z) % 2 == 0
+		else FLOOR_TILE_C02_COMPONENT_ID
+	)
+
+
+func _spawn_authored_layout_floor_tile(art_root: Node3D, instance: Dictionary) -> bool:
+	var source_component_id := str(instance.get("component_id", ""))
+	var local_position := instance.get("position", Vector3.ZERO) as Vector3
+	var component_id := _runtime_floor_tile_component_id(source_component_id, local_position)
+	var prefab := _authored_component_prefab(component_id)
+	if prefab == null:
+		push_error(
+			"DungeonRoom3D: 授权布局 %s 没有地砖组件 %s 的 prefab 映射（实例 %s）"
+			% [room_id, component_id, str(instance.get("name", ""))]
+		)
+		return false
+	var tile := prefab.instantiate() as Node3D
+	if tile == null:
+		push_error("DungeonRoom3D: 授权地砖实例化失败（%s）" % component_id)
+		return false
+	tile.name = str(instance.get("name", "AuthoredFloorTile"))
+	# 砖面顶面按每个组件自己声明的 snap_to_walk_plane_offset_m 落到 Y=0
+	#（c01/c02 结构厚不同，不能共用一个硬编码偏移）。
+	var snap_offset := float(tile.get_meta("snap_to_walk_plane_offset_m", 0.0))
+	var target_y := local_position.y
+	var runtime_remapped := component_id != source_component_id
+	if runtime_remapped or not bool(instance.get("preserve_authored_y", false)):
+		target_y = 0.0
+	tile.position = Vector3(local_position.x, target_y + snap_offset, local_position.z)
+	tile.rotation.y = deg_to_rad(float(instance.get("rotation_y_deg", 0.0)))
+	tile.scale = instance.get("scale", Vector3.ONE) as Vector3
+	tile.set_meta("walk_plane_snap_y", target_y + snap_offset)
+	tile.set_meta("authored_component_id", component_id)
+	tile.set_meta("authored_source_component_id", source_component_id)
+	# 承重归 TowerFloorStage3D._build_support()，这里必须把内嵌静态碰撞关掉。
+	_disable_static_collision_descendants(tile)
+	art_root.add_child(tile)
+	return true
+
+
+## 房型默认布局中的普通组件。位置、旋转、缩放都来自 Blender 组件实例清单；
+## PackedScene 负责碰撞与元数据；仅真实门槽的墙皮盒按门洞净空裁切，不叠加整墙碰撞。
+func _spawn_authored_room_type_component(art_root: Node3D, instance: Dictionary) -> bool:
+	var component_id := str(instance.get("component_id", ""))
+	var prefab := _authored_component_prefab(component_id)
+	if prefab == null:
+		push_error(
+			"DungeonRoom3D: 房型布局 %s 没有组件 %s 的 prefab 映射（实例 %s）"
+			% [room_id, component_id, str(instance.get("name", ""))]
+		)
+		return false
+	var module := prefab.instantiate() as Node3D
+	if module == null:
+		push_error("DungeonRoom3D: 房型组件实例化失败（%s）" % component_id)
+		return false
+	module.name = str(instance.get("name", "RoomTypeComponent"))
+	module.position = instance.get("position", Vector3.ZERO) as Vector3
+	module.rotation.y = deg_to_rad(float(instance.get("rotation_y_deg", 0.0)))
+	module.scale = instance.get("scale", Vector3.ONE) as Vector3
+	module.set_meta("authored_component_id", component_id)
+	module.set_meta("authored_slot_role", "room_type_component")
+	_set_geometry_shadow_casting(module, true)
+	_apply_authored_room_type_wall_door_collision(module, get_dimensions() * 0.5, module.transform)
+	art_root.add_child(module)
+	return true
+
+
+## 只裁切真实连接门槽上的墙皮结构盒；保留两侧、门楣和门洞以下的原碰撞。
+## 使用组件语义与完整房间变换，不依赖房间编号、实例名称或烘焙 side 元数据。
+func _apply_authored_room_type_wall_door_collision(
+	module: Node3D, half: Vector2, module_to_room: Transform3D
+) -> void:
+	var slug := str(module.get_meta("component_slug", ""))
+	var policy := str(module.get_meta("collision_policy", ""))
+	if not slug.begins_with("wall_skin_"):
+		return
+	if policy != "structural_box_proxy":
+		return
+	for value in module.find_children("*", "CollisionShape3D", true, false):
+		var collision := value as CollisionShape3D
+		var body := collision.get_parent() as StaticBody3D
+		var box := collision.shape as BoxShape3D
+		if body == null or (body.collision_layer & 1) == 0 or box == null or collision.disabled:
+			continue
+		var shape_to_module := collision.transform
+		var ancestor := collision.get_parent() as Node3D
+		while ancestor != null and ancestor != module:
+			shape_to_module = ancestor.transform * shape_to_module
+			ancestor = ancestor.get_parent() as Node3D
+		if ancestor != module:
+			continue
+		var shape_to_room := module_to_room * shape_to_module
+		var long_axis := 2 if box.size.z > box.size.x else 0
+		var along_axis := shape_to_room.basis[long_axis]
+		var up_axis := shape_to_room.basis.y
+		var normal_axis := shape_to_room.basis[2 - long_axis]
+		# 非正交四向墙不猜裁切轴；源盒、作者缩放和镜像均按各自局部轴换算。
+		if along_axis.is_zero_approx() or up_axis.is_zero_approx() or normal_axis.is_zero_approx():
+			continue
+		if absf(up_axis.normalized().dot(Vector3.UP)) < 0.999:
+			continue
+		for side in doors:
+			var tangent := Vector3.RIGHT if side in ["north", "south"] else Vector3.BACK
+			var normal := Vector3.BACK if side in ["north", "south"] else Vector3.RIGHT
+			var center := shape_to_room.origin
+			var thickness := box.size[2 - long_axis] * normal_axis.length()
+			var door_offset := float(get_meta("tower_wall_door_offset_%s" % side, 0.0))
+			if absf(along_axis.normalized().dot(tangent)) < 0.999:
+				continue
+			if absf(normal_axis.normalized().dot(normal)) < 0.999:
+				continue
+			# 墙皮位于结构墙内侧；允许一层墙皮厚度的内缩，不能放宽全房门槽容差。
+			if (
+				absf(center.dot(normal) - door_plane_depth(side, half))
+				> thickness + DOOR_LANE_GUARD_TOLERANCE_M
+			):
+				continue
+			if absf(module_to_room.origin.dot(tangent) - door_offset) > DOOR_LANE_GUARD_TOLERANCE_M:
+				continue
+			var room_to_shape := shape_to_room.affine_inverse()
+			var door_bottom_room := tangent * door_offset + normal * center.dot(normal)
+			var door_bottom := room_to_shape * door_bottom_room
+			var door_top := room_to_shape * (
+				door_bottom_room + Vector3.UP * TOWER_GEOMETRY.DOOR_CLEAR_HEIGHT_M
+			)
+			var lower := -box.size * 0.5
+			var upper := box.size * 0.5
+			var opening_half_width := TOWER_GEOMETRY.DOOR_CLEAR_WIDTH_M * 0.5 / along_axis.length()
+			var cut_min := maxf(lower[long_axis], door_bottom[long_axis] - opening_half_width)
+			var cut_max := minf(upper[long_axis], door_bottom[long_axis] + opening_half_width)
+			var cut_bottom := maxf(lower.y, minf(door_bottom.y, door_top.y))
+			var cut_top := minf(upper.y, maxf(door_bottom.y, door_top.y))
+			if cut_max - cut_min <= 0.001 or cut_top - cut_bottom <= 0.001:
+				continue
+			# 替换原盒而非仅 disabled：流送会重新启用形状，不能让整盒再次挡门。
+			for index in range(4):
+				var segment_min := lower
+				var segment_max := upper
+				match index:
+					0:
+						segment_max[long_axis] = cut_min
+					1:
+						segment_min[long_axis] = cut_max
+					2, 3:
+						segment_min[long_axis] = cut_min
+						segment_max[long_axis] = cut_max
+						if index == 2:
+							segment_max.y = cut_bottom
+						else:
+							segment_min.y = cut_top
+				var segment_size := segment_max - segment_min
+				if minf(segment_size.x, minf(segment_size.y, segment_size.z)) <= 0.001:
+					continue
+				var segment := CollisionShape3D.new()
+				segment.name = "%s_DoorSlot_%d" % [collision.name, index]
+				segment.transform = collision.transform * Transform3D(Basis.IDENTITY, (segment_min + segment_max) * 0.5)
+				var segment_shape := BoxShape3D.new()
+				segment_shape.size = segment_size
+				segment.shape = segment_shape
+				body.add_child(segment)
+			body.remove_child(collision)
+			collision.free()
+			break
+
+
+## 授权**专属件**（Boss 房 6 件：地板底板 / 主屏 / 粗重桥架 / 北墙标识 / 南地标附件 / 碎屑）。
+##
+## 与另外三类（角件 / 墙 / 地砖）的差别只有两条，但两条都必须写死：
+##   ① **y 不归一**：清单给的是完整 Vector3，y = 该件底面离走行面的设计悬空高度
+##      （主屏 3.805m、北墙标识 7.4461m）。前三类走 `to_runtime_instances()`，那里 y 恒 0
+##      只对落地件成立 —— 照抄会把主屏砸到地上。所以这里直接取清单的 position。
+##   ② **朝向独立**：不接 `_authored_wall_direction()`（那是四向墙的语义），只按
+##      rotation_y_deg 原样转，专属件可以出现非 90° 倍数角。
+##
+## shadow 一律不动（沿用 prefab 自带设置）：与 `_spawn_authored_layout_floor_tile()` 同口径，
+## 只有墙体承担 `cast_and_receive` 契约。碰撞按摆位源声明全部 visual_only（
+## `collision_owner: none`，`base_floor_base` 的承重归 `TowerFloorStage3D._build_support()`），
+## 这里显式再关一次内嵌静态碰撞，保证将来某件补了碰撞也不会挡人。
+func _spawn_authored_layout_exclusive(art_root: Node3D, instance: Dictionary) -> bool:
+	var component_id := str(instance.get("component_id", ""))
+	var prefab := _authored_component_prefab(component_id)
+	if prefab == null:
+		push_error(
+			"DungeonRoom3D: 授权布局 %s 没有专属件 %s 的 prefab 映射（实例 %s）"
+			% [room_id, component_id, str(instance.get("name", ""))]
+		)
+		return false
+	var module := prefab.instantiate() as Node3D
+	if module == null:
+		push_error("DungeonRoom3D: 授权专属件实例化失败（%s）" % component_id)
+		return false
+	module.name = str(instance.get("name", "AuthoredExclusive"))
+	module.position = instance.get("position", Vector3.ZERO) as Vector3
+	module.rotation.y = deg_to_rad(float(instance.get("rotation_y_deg", 0.0)))
+	module.set_meta("authored_component_id", component_id)
+	module.set_meta("authored_slot_role", "exclusive_component")
+	module.set_meta("authored_collision_policy", "visual_only")
+	_disable_static_collision_descendants(module)
+	art_root.add_child(module)
+	return true
+
+
+## 授权**多层件**（通道桥房的下沉坑）：坑壁 / 护栏（`part = pit_wall`）与坑底地砖
+## （`part = pit_floor_tile`）。
+##
+## 与另外四类的差别只有两条，两条都必须写死：
+##   ① **y 不归一**：位置是完整 Vector3，y = 该件所在水平面标高（坑底走行面 −12m）。
+##      照 `to_runtime_instances()` 的 y≡0 落地口径处理会把整圈坑壁砸进平台。
+##   ② **可纵向拉伸**：坑壁靠 `scale_y` 把一件 11.9m 标准墙拉到「坑深 12m + 地上护栏 0.8m」，
+##      一件墙同时给出坑壁与护栏，不必新增资产（护栏与坑壁同材质、视觉连贯）。
+##
+## ⚠ **不写 `tower_wall_direction`**：坑壁不是房间外墙。该 meta 是门槽判据
+## （`classify_door_lane` 只吃墙分支采集的 `authored_wall_records`）与塔楼墙验收的索引键，
+## 坑壁写上去会让验收把坑壁当房墙统计 ⇒ 门槽归属与墙数全错。
+func _spawn_authored_multi_level(art_root: Node3D, instance: Dictionary) -> bool:
+	var component_id := str(instance.get("component_id", ""))
+	var prefab := _authored_component_prefab(component_id)
+	if prefab == null:
+		push_error(
+			"DungeonRoom3D: 授权布局 %s 没有多层件 %s 的 prefab 映射（实例 %s）"
+			% [room_id, component_id, str(instance.get("name", ""))]
+		)
+		return false
+	var module := prefab.instantiate() as Node3D
+	if module == null:
+		push_error("DungeonRoom3D: 授权多层件实例化失败（%s）" % component_id)
+		return false
+	module.name = str(instance.get("name", "AuthoredMultiLevel"))
+	var local_position := instance.get("position", Vector3.ZERO) as Vector3
+	module.rotation.y = deg_to_rad(float(instance.get("rotation_y_deg", 0.0)))
+	module.set_meta("authored_component_id", component_id)
+	module.set_meta("authored_slot_role", "multi_level_component")
+	match str(instance.get("part", "")):
+		"pit_wall":
+			# 墙件原点 = 底面中心：position.y 就是墙底标高，wall 高由 scale_y 给出。
+			module.scale = Vector3(1.0, float(instance.get("scale_y", 1.0)), 1.0)
+			module.position = local_position
+			module.set_meta("authored_multi_level_part", "pit_wall")
+			module.set_meta("authored_multi_level_scale_y", module.scale.y)
+			# 坑壁自带碰撞（组件 `collision_owner = self`）承担挡人：玩家在平台上被
+			# 露出的 0.8m 护栏挡住，掉不进坑。这里不关内嵌碰撞。
+			_set_geometry_shadow_casting(module, true)
+			module.set_meta("shadow_policy", "cast_and_receive")
+		"pit_floor_tile":
+			# 地砖原点同为底面中心：把砖顶面抬到 position.y（与上层地砖 position.y = snap 同口径）。
+			var snap_offset := float(module.get_meta("snap_to_walk_plane_offset_m", 0.0))
+			module.position = Vector3(
+				local_position.x, local_position.y + snap_offset, local_position.z
+			)
+			module.set_meta("authored_multi_level_part", "pit_floor_tile")
+			module.set_meta("walk_plane_snap_y", local_position.y + snap_offset)
+			# 坑底不是走行面（不可达纯装饰）：与所有授权地砖同口径关掉内嵌静态碰撞。
+			_disable_static_collision_descendants(module)
+		_:
+			push_error(
+				"DungeonRoom3D: 授权多层件 %s 的 part=%s 未接线"
+				% [module.name, str(instance.get("part", ""))]
+			)
+			return false
+	art_root.add_child(module)
+	return true
+
+
+func _build_base_facility_shell(dimensions: Vector2) -> void:
+	# V021完整地板表现由基地美术布局直接实例化。不能再生成旧普通/铆钉
+	# MultiMesh视觉砖，否则会与Blender完整地板发生双重绘制；FloorSupport仍
+	# 保持原30×30m承重与6×6×5m规格，碰撞坐标不变。
+	# 99层外圈只使用普通墙和独立门墙；窗墙属于100层，不得混入本层。
+	_build_tower_wall_v2(dimensions)
+
+
+func _add_base_floor_grid(
+	node_name: String,
+	floor_mesh: Mesh,
+	transforms: Array[Transform3D],
+	asset_id: String
+) -> void:
+	var mesh_bounds := floor_mesh.get_aabb()
+	var mesh_bottom_y := mesh_bounds.position.y
+	var mesh_top_y := mesh_bounds.position.y + mesh_bounds.size.y
+	# 不使用mesh_top_y：铆钉、压条等突出几何属于纯表现。若按AABB最高点
+	# 对齐，会把整块铆钉地板下压并把原本可见的铁皮压进结构面。
+	var visual_origin_y := (
+		BASE99_FLOOR_TARGET_SURFACE_Y_M - BASE99_FLOOR_STRUCTURAL_TOP_Y_M
+	)
+	var decoration_top_y := visual_origin_y + mesh_top_y
+	var floor_multimesh := MultiMesh.new()
+	floor_multimesh.transform_format = MultiMesh.TRANSFORM_3D
+	floor_multimesh.mesh = floor_mesh
+	floor_multimesh.instance_count = transforms.size()
+	for index in range(transforms.size()):
+		var source_transform := transforms[index]
+		var aligned_transform := Transform3D(
+			source_transform.basis,
+			Vector3(
+				source_transform.origin.x,
+				visual_origin_y,
+				source_transform.origin.z
+			)
+		)
+		floor_multimesh.set_instance_transform(index, aligned_transform)
+	var floor_grid := MultiMeshInstance3D.new()
+	floor_grid.name = node_name
+	floor_grid.multimesh = floor_multimesh
+	# 场景结构统一参与真实遮光；玩法阻挡仍由独立碰撞层负责。
+	floor_grid.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_ON
+	floor_grid.set_meta("asset_id", asset_id)
+	floor_grid.set_meta("grid_dimensions", Vector2i(6, 6))
+	floor_grid.set_meta("instance_count", transforms.size())
+	floor_grid.set_meta("floor_index", 99)
+	floor_grid.set_meta("visual_mesh_bottom_y_m", mesh_bottom_y)
+	floor_grid.set_meta("visual_mesh_top_y_m", mesh_top_y)
+	floor_grid.set_meta("visual_structural_top_local_y_m", BASE99_FLOOR_STRUCTURAL_TOP_Y_M)
+	floor_grid.set_meta("visual_origin_y_m", visual_origin_y)
+	floor_grid.set_meta("visual_surface_y_m", BASE99_FLOOR_TARGET_SURFACE_Y_M)
+	floor_grid.set_meta("visual_decoration_top_y_m", decoration_top_y)
+	floor_grid.set_meta("collision_surface_y_m", 0.0)
+	floor_grid.set_meta("collision_policy", "shared_flat_support_visual_protrusions_ignored")
+	floor_grid.set_meta("shadow_policy", "cast_and_receive")
+	add_child(floor_grid)
+
+
+func _get_base99_floor_mesh(prefab: PackedScene, rivet: bool) -> Mesh:
+	if rivet and _base99_floor_rivet_mesh != null:
+		return _base99_floor_rivet_mesh
+	if not rivet and _base99_floor_plain_mesh != null:
+		return _base99_floor_plain_mesh
+	var source := prefab.instantiate()
+	var mesh := TOWER_GEOMETRY.resolve_visual_mesh(source)
+	source.free()
+	if rivet:
+		_base99_floor_rivet_mesh = mesh
+	else:
+		_base99_floor_plain_mesh = mesh
+	return mesh
+
+
+func _get_tower_floor_tile_mesh() -> Mesh:
+	if _tower_floor_tile_mesh != null:
+		return _tower_floor_tile_mesh
+	var source := TOWER_FLOOR_TILE_PREFAB.instantiate()
+	_tower_floor_tile_mesh = TOWER_GEOMETRY.resolve_visual_mesh(source)
+	source.free()
+	return _tower_floor_tile_mesh
+
+
+func _build_tower_wall_run(direction: String, dimensions: Vector2) -> void:
+	var horizontal := direction in ["north", "south"]
+	var length := dimensions.x if horizontal else dimensions.y
+	var module_count := maxi(1, int(round(length / TOWER_GEOMETRY.GRID_UNIT_M)))
+	var has_door := doors.has(direction)
+	# 门模块位置：选择最接近沿墙中心的模块；6 段选择 2 或 3，哪个离 0 近选哪个。
+	var door_index := 0
+	if has_door:
+		var candidate_a := int(floor((module_count - 1) / 2.0))
+		var candidate_b := int(ceil((module_count - 1) / 2.0))
+		var pos_a := -length * 0.5 + TOWER_GEOMETRY.GRID_UNIT_M * (float(candidate_a) + 0.5)
+		var pos_b := -length * 0.5 + TOWER_GEOMETRY.GRID_UNIT_M * (float(candidate_b) + 0.5)
+		door_index = candidate_a if absf(pos_a) <= absf(pos_b) else candidate_b
+		var door_offset_along := -length * 0.5 + TOWER_GEOMETRY.GRID_UNIT_M * (float(door_index) + 0.5)
+		set_meta("tower_wall_door_offset_%s" % direction, door_offset_along)
+	var wall_offset := dimensions.y * 0.5 if horizontal else dimensions.x * 0.5
+	var solid_transforms: Array[Transform3D] = []
+	for module_index in range(module_count):
+		var along := -length * 0.5 + TOWER_GEOMETRY.GRID_UNIT_M * (float(module_index) + 0.5)
+		var module_position := Vector3.ZERO
+		var rotation_y := 0.0
+		match direction:
+			"north":
+				module_position = Vector3(along, 0.0, -wall_offset)
+			"south":
+				module_position = Vector3(along, 0.0, wall_offset)
+				rotation_y = PI
+			"west":
+				module_position = Vector3(-wall_offset, 0.0, along)
+				rotation_y = PI * 0.5
+			_:
+				module_position = Vector3(wall_offset, 0.0, along)
+				rotation_y = -PI * 0.5
+		var is_door_module := has_door and module_index == door_index
+		if is_door_module:
+			var module := TOWER_DOOR_PREFAB.instantiate() as Node3D
+			module.name = "Imported_DoorWall5M_%s_I%02d" % [
+				direction.capitalize(),
+				module_index,
+			]
+			module.position = module_position
+			module.rotation.y = rotation_y
+			module.set_meta("asset_id", "ENV-TOWER-WALL-DOOR-5M")
+			module.set_meta("grid_unit_m", TOWER_GEOMETRY.GRID_UNIT_M)
+			module.set_meta("tower_wall_direction", direction)
+			_set_camera_lower_wall_on_static_bodies(
+				module, direction in ["north", "south"]
+			)
+			add_child(module)
+			_add_tower_wall_collision(
+				direction,
+				module_position,
+				rotation_y,
+				true,
+				module_index
+			)
+		else:
+			solid_transforms.append(Transform3D(
+				Basis(Vector3.UP, rotation_y),
+				module_position
+			))
+	_spawn_solid_wall_visual_instances(direction, solid_transforms)
+	_add_tower_solid_run_collision(
+		direction,
+		length,
+		module_count,
+		door_index,
+		has_door,
+		wall_offset
+	)
+
+
+func _build_tower_wall_multimesh(
+	direction: String,
+	transforms: Array[Transform3D]
+) -> void:
+	var mesh := _get_tower_solid_wall_mesh()
+	if mesh == null or transforms.is_empty():
+		return
+	var multimesh := MultiMesh.new()
+	multimesh.transform_format = MultiMesh.TRANSFORM_3D
+	multimesh.mesh = mesh
+	multimesh.instance_count = transforms.size()
+	# 通用墙视觉网格为11.9m高；按包围盒底面反算偏移，继续贴合原Y=0基准。
+	var visual_floor_offset_y := -mesh.get_aabb().position.y
+	for index in range(transforms.size()):
+		var wall_transform := transforms[index]
+		wall_transform.origin.y += visual_floor_offset_y
+		multimesh.set_instance_transform(index, wall_transform)
+	var visual := MultiMeshInstance3D.new()
+	visual.name = "Imported_SolidWall5M_%s_Run" % direction.capitalize()
+	visual.multimesh = multimesh
+	visual.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_ON
+	visual.set_meta("asset_id", "ENV-TOWER-WALL-SOLID-5M")
+	visual.set_meta("grid_unit_m", TOWER_GEOMETRY.GRID_UNIT_M)
+	visual.set_meta("tower_wall_direction", direction)
+	add_child(visual)
+
+
+## v0.1 v2 拼接交替装饰：按偶/奇段分成A/B两个MultiMesh。
+## 结构永久驻留后禁止再用“每5m一节点”；材质节奏、阴影和碰撞保持不变。
+func _spawn_solid_wall_visual_instances(
+	direction: String,
+	transforms: Array[Transform3D],
+	segment_indices: Array[int] = []
+) -> void:
+	var uses_base99_visual := room_type == "FACILITY"
+	var mesh := _get_base99_solid_wall_mesh() if uses_base99_visual else _get_tower_solid_wall_mesh()
+	if mesh == null or transforms.is_empty():
+		return
+	# 装配基准偏移来自资产声明的 origin_contract（bottom_center → 0）。
+	# 旧实现是「-mesh.get_aabb().position.y」反算，注释里写着「通用旧墙以几何中心为
+	# 原点、需抬高半层」——2026-09-19 实测证明该描述已过时：塔楼 v003 与基地墙的
+	# 网格 AABB 底面都在 y=0，反算结果恒为 0。改用声明值后，美术若加装饰件
+	# （门墙门框就下探 0.14m）也不会把整面墙顶高。
+	var visual_floor_offset_y := (
+		_base99_solid_wall_origin_offset_y
+		if uses_base99_visual
+		else _tower_solid_wall_origin_offset_y
+	)
+	var transforms_a: Array[Transform3D] = []
+	var transforms_b: Array[Transform3D] = []
+	for index in range(transforms.size()):
+		var abs_segment_index := (
+			segment_indices[index]
+			if index < segment_indices.size()
+			else index
+		)
+		var wall_transform := transforms[index]
+		wall_transform.origin.y += visual_floor_offset_y
+		if abs_segment_index % 2 == 0:
+			transforms_a.append(wall_transform)
+		else:
+			transforms_b.append(wall_transform)
+	var material_a: StandardMaterial3D = null
+	var material_b: StandardMaterial3D = null
+	# 塔楼正式 GLB 自带 PaletteUV（资产侧声明 preserve_authored_palette）；
+	# 只有仍在使用主题材质的模块才做暖色 A/B 逐段交替覆盖，否则美术会被盖成单色。
+	if not uses_base99_visual and not _tower_solid_wall_preserves_palette:
+		material_a = _get_wall_module_material(0)
+		material_b = _get_wall_module_material(1)
+	var plain_asset_id := (
+		"ENV-BASE99-WALL-PLAIN-5X12"
+		if uses_base99_visual
+		else "ENV-TOWER-WALL-SOLID-5M"
+	)
+	_add_wall_multimesh_variant(
+		direction, "A", mesh, transforms_a, material_a, plain_asset_id
+	)
+	_add_wall_multimesh_variant(
+		direction, "B", mesh, transforms_b, material_b, plain_asset_id
+	)
+
+
+func _add_wall_multimesh_variant(
+	direction: String,
+	variant: String,
+	mesh: Mesh,
+	transforms: Array[Transform3D],
+	material: StandardMaterial3D,
+	asset_id: String
+) -> void:
+	if mesh == null or transforms.is_empty():
+		return
+	var multimesh := MultiMesh.new()
+	multimesh.transform_format = MultiMesh.TRANSFORM_3D
+	multimesh.mesh = mesh
+	multimesh.instance_count = transforms.size()
+	for index in range(transforms.size()):
+		multimesh.set_instance_transform(index, transforms[index])
+	var visual := MultiMeshInstance3D.new()
+	visual.name = "Imported_SolidWall5M_%s_Run_%s" % [direction.capitalize(), variant]
+	visual.multimesh = multimesh
+	# 基地正式GLB保留自身PaletteUV多表面材质；旧通用墙才使用主题材质覆盖。
+	if material != null:
+		visual.material_override = material
+	visual.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_ON
+	visual.set_meta("asset_id", asset_id)
+	visual.set_meta("grid_unit_m", TOWER_GEOMETRY.GRID_UNIT_M)
+	visual.set_meta("logical_height_m", TOWER_GEOMETRY.WALL_LOGICAL_HEIGHT_M)
+	visual.set_meta("visual_height_m", TOWER_GEOMETRY.WALL_VISUAL_HEIGHT_M)
+	visual.set_meta("visual_top_clearance_m", TOWER_GEOMETRY.WALL_VISUAL_TOP_CLEARANCE_M)
+	visual.set_meta("tower_wall_direction", direction)
+	visual.set_meta("material_variant", variant)
+	visual.set_meta("segment_count", transforms.size())
+	visual.set_meta("floor_index", 99 if room_type == "FACILITY" else -1)
+	visual.set_meta("visual_only", room_type == "FACILITY")
+	visual.set_meta("collision_owner", "DungeonRoom3D")
+	visual.set_meta(
+		"shadow_policy",
+		"cast_and_receive"
+	)
+	add_child(visual)
+
+
+func _get_tower_solid_wall_mesh() -> Mesh:
+	if _tower_solid_wall_mesh != null:
+		return _tower_solid_wall_mesh
+	var source := TOWER_WALL_PREFAB.instantiate()
+	_tower_solid_wall_mesh = TOWER_GEOMETRY.resolve_visual_mesh(source)
+	# 资产侧声明该模块自带调色板：运行时不得再用主题 A/B 材质覆盖。
+	_tower_solid_wall_preserves_palette = bool(
+		source.get_meta("preserve_authored_palette", false)
+	)
+	_tower_solid_wall_origin_offset_y = TOWER_GEOMETRY.origin_offset_y(source)
+	_tower_solid_wall_declared_instantiation = str(
+		source.get_meta("runtime_instantiation", "")
+	)
+	# 本函数有 mesh 缓存，每进程只走一次；断言放这里正好只报一次。
+	# 实墙的装配路径是本文件的 _spawn_solid_wall_visual_instances → MultiMesh，
+	# 资产必须声明 batched_multimesh。声明成 per_instance_prefab 说明有人
+	# 按「逐 prefab 实例化」去过资产或读过契约卡，会得出错误结论。
+	if _tower_solid_wall_declared_instantiation == "per_instance_prefab":
+		push_error(
+			"DungeonRoom3D: 塔楼实墙 prefab 声明 runtime_instantiation=per_instance_prefab，"
+			+ "但运行时实际由 MultiMesh 批渲染承载（节点树被丢弃）。"
+			+ "请把 prp_tower_wall_solid_5m.tscn 改为 batched_multimesh。"
+		)
+	source.free()
+	return _tower_solid_wall_mesh
+
+
+func _get_base99_solid_wall_mesh() -> Mesh:
+	if _base99_solid_wall_mesh != null:
+		return _base99_solid_wall_mesh
+	var source := BASE99_WALL_PLAIN_PREFAB.instantiate()
+	_base99_solid_wall_mesh = TOWER_GEOMETRY.resolve_visual_mesh(source)
+	_base99_solid_wall_origin_offset_y = TOWER_GEOMETRY.origin_offset_y(source)
+	source.free()
+	return _base99_solid_wall_mesh
+
+
+func _set_geometry_shadow_casting(root: Node, enabled: bool) -> void:
+	if root is GeometryInstance3D:
+		(root as GeometryInstance3D).cast_shadow = (
+			GeometryInstance3D.SHADOW_CASTING_SETTING_ON
+			if enabled
+			else GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+		)
+	for child in root.get_children():
+		_set_geometry_shadow_casting(child, enabled)
+
+
+## v0.1 v2 模块化墙拼装：4 拐角 + 边墙 + 门洞
+## 以门的世界坐标为锥点：拿到门 world pos → 拆为沿墙距离 → 取最近 5m 段作门洞。
+## 拼装规则：
+##   1. 4 拐角 L 形各布于房间四角原点，2.5m 双向覆盖
+##   2. 4 边墙剔除两端 2.5m 后用 5m 单元填：门洞取距 door world pos 最近的 5m 段
+##   3. 门洞剩余部分仍走 _build_door 独立挂门
+func _build_tower_wall_v2(dimensions: Vector2) -> void:
+	var wall_directions: Array[String] = ["north", "south", "west", "east"]
+	if size_class == "rooftop":
+		var access_direction := doors[0] if not doors.is_empty() else "west"
+		wall_directions.assign([access_direction])
+		if access_direction in ["west", "east"]:
+			wall_directions.append("north")
+			wall_directions.append("south")
+		else:
+			wall_directions.append("west")
+			wall_directions.append("east")
+	for open_direction in open_wall_directions:
+		wall_directions.erase(open_direction)
+	# 1. 拼 4 拐角 L 型（房间四角）
+	if size_class != "rooftop":
+		_spawn_room_corner(Vector2(-dimensions.x * 0.5, -dimensions.y * 0.5), "NW")
+		_spawn_room_corner(Vector2(dimensions.x * 0.5, -dimensions.y * 0.5), "NE")
+		_spawn_room_corner(Vector2(-dimensions.x * 0.5, dimensions.y * 0.5), "SW")
+		_spawn_room_corner(Vector2(dimensions.x * 0.5, dimensions.y * 0.5), "SE")
+	# 2. 每条边跳过两端 2.5m，用 5m 单元填。门洞位置由门 world pos 准动计算。
+	# 天台边界由TowerFloorStage3D独立承担；start只保留楼梯口的5m门洞墙，
+	# 不再生成65m核心区连续实墙。
+	var include_solid_runs := size_class != "rooftop"
+	for direction in wall_directions:
+		_build_corner_aware_wall_run(direction, dimensions, include_solid_runs)
+	# 3. 门洞仍走原 _build_door
+	for direction in doors:
+		_build_door(direction, str(door_targets.get(direction, "")), dimensions)
+
+
+## 将房间门 world pos 折算为“沿墙距离”（沿该边从负端点量起的米数）
+func _local_along_from_door_world(direction: String, door_world: Vector3, dimensions: Vector2) -> float:
+	var horizontal := direction in ["north", "south"]
+	var wall_offset := dimensions.y * 0.5 if horizontal else dimensions.x * 0.5
+	var center := global_position
+	var local := door_world - center
+	# 沿墙轴的投影分量：n/s 门走 ±x，w/e 门走 ±z
+	var along_local: float
+	if horizontal:
+		along_local = local.x
+		if direction == "south":
+			along_local = -along_local
+	else:
+		along_local = local.z
+		if direction == "east":
+			along_local = -along_local
+	# local 中已含“沿墙距离 = 门 world 距房中心”在墙面投影后的位置
+	# （world_x - center_x）与 wall_offset 无关，该偏移是横向墙厚
+	return along_local
+
+
+## 拼接一条边墙：剔除两端 5m（跨过拐角覆盖区）后用 5m 单元填
+## 边墙与地砖严格对齐同 5m 网格：地砖 6×6 的房间，边墙 6 段总数中 2 端被拐角覆盖，中间 4 段拼接。
+func _build_corner_aware_wall_run(
+	direction: String, dimensions: Vector2, include_solid_runs := true
+) -> void:
+	var horizontal := direction in ["north", "south"]
+	var length := dimensions.x if horizontal else dimensions.y
+	var wall_offset := dimensions.y * 0.5 if horizontal else dimensions.x * 0.5
+	# 门预留：直接读 _plan_room_layout 写入的 meta “tower_wall_door_offset_<dir>”
+	var has_door := doors.has(direction)
+	var door_index := -1
+	if has_door:
+		var door_offset_along := float(get_meta("tower_wall_door_offset_%s" % direction, 0.0))
+		# 反推 door_index：6 段 30m 房，段中心 = -length/2 + 5*(index+0.5)
+		var module_count_full := maxi(1, int(round(length / TOWER_GEOMETRY.GRID_UNIT_M)))
+		for module_index in range(module_count_full):
+			var segment_center := -length * 0.5 + TOWER_GEOMETRY.GRID_UNIT_M * (float(module_index) + 0.5)
+			if absf(segment_center - door_offset_along) < 0.01:
+				door_index = module_index
+				break
+	# 墙段范围：从段 1 开始（跳过段 0 拐角覆盖）到段 module_count-2 结束（跳过末段拐角）
+	var module_count := maxi(1, int(round(length / TOWER_GEOMETRY.GRID_UNIT_M)))
+	var start_index := 1
+	var end_index := module_count - 2
+	if end_index < start_index:
+		return
+	var middle_module_count := end_index - start_index + 1
+	var solid_transforms: Array[Transform3D] = []
+	var solid_segment_indices: Array[int] = []
+	for module_index in range(start_index, end_index + 1):
+		var along := -length * 0.5 + TOWER_GEOMETRY.GRID_UNIT_M * (float(module_index) + 0.5)
+		var is_door_module := has_door and module_index == door_index
+		var module_position := Vector3.ZERO
+		var rotation_y := 0.0
+		match direction:
+			"north":
+				module_position = Vector3(along, 0.0, -wall_offset)
+			"south":
+				module_position = Vector3(along, 0.0, wall_offset)
+				rotation_y = PI
+			"west":
+				module_position = Vector3(-wall_offset, 0.0, along)
+				rotation_y = PI * 0.5
+			_:
+				module_position = Vector3(wall_offset, 0.0, along)
+				rotation_y = -PI * 0.5
+		if is_door_module:
+			var uses_base99_door := room_type == "FACILITY"
+			var module_scene := (
+				BASE99_WALL_DOOR_PREFAB if uses_base99_door else TOWER_DOOR_PREFAB
+			)
+			var module := module_scene.instantiate() as Node3D
+			module.name = "Imported_DoorWall5M_%s_I%02d" % [
+				direction.capitalize(),
+				module_index,
+			]
+			module.position = module_position
+			module.rotation.y = rotation_y
+			module.set_meta(
+				"asset_id",
+				"ENV-BASE99-WALL-DOOR-5X12"
+				if uses_base99_door
+				else "ENV-TOWER-WALL-DOOR-5M"
+			)
+			module.set_meta("grid_unit_m", TOWER_GEOMETRY.GRID_UNIT_M)
+			module.set_meta("tower_wall_direction", direction)
+			if uses_base99_door:
+				_set_geometry_shadow_casting(module, true)
+				module.set_meta("shadow_policy", "cast_and_receive")
+				module.set_meta("floor_index", 99)
+			else:
+				_apply_module_material_variant(module, module_index)
+			_set_camera_lower_wall_on_static_bodies(
+				module, direction in ["north", "south"]
+			)
+			add_child(module)
+			_add_tower_wall_collision(
+				direction,
+				module_position,
+				rotation_y,
+				true,
+				module_index
+			)
+		elif include_solid_runs:
+			solid_transforms.append(Transform3D(
+				Basis(Vector3.UP, rotation_y),
+				module_position
+			))
+			solid_segment_indices.append(module_index)
+	if not include_solid_runs:
+		return
+	_spawn_solid_wall_visual_instances(
+		direction,
+		solid_transforms,
+		solid_segment_indices
+	)
+	var collision_start := -length * 0.5 + TOWER_GEOMETRY.GRID_UNIT_M * float(start_index)
+	var collision_end := -length * 0.5 + TOWER_GEOMETRY.GRID_UNIT_M * float(end_index + 1)
+	_add_corner_aware_solid_run_collision(
+		direction,
+		wall_offset,
+		collision_start,
+		collision_end,
+		has_door,
+		door_index
+	)
+
+
+## 拐角 L 拼装。从 4 个角位置以合适的 rotation 报入。
+## corner_id: "NW" / "NE" / "SW" / "SE"
+func _spawn_room_corner(
+	corner_pos: Vector2, corner_id: String, parent: Node = self, instance_label := ""
+) -> Node3D:
+	# Base99 receives its authored Blender visual. Other tower room types retain
+	# the generic corner asset and its existing material-variant behaviour.
+	var corner_prefab := BASE99_CORNER_L_PREFAB if room_type == "FACILITY" else TOWER_CORNER_L_PREFAB
+	var module := corner_prefab.instantiate() as Node3D
+	# 非矩形房可在同一朝向出现多个凸角（例如 db_01 南侧外凸的两个 SE/SW）。
+	# 组件来源实例名含真实轮廓坐标，优先用它维持同级节点名唯一；否则 Godot 保存 TSCN
+	# 时会把重复节点降成 @Node3D@N，编辑器无法再从树上辨认是哪一个外轮廓角。
+	module.name = "Imported_CornerL5M_%s" % (instance_label if not instance_label.is_empty() else corner_id)
+	module.position = Vector3(corner_pos.x, 0.0, corner_pos.y)
+	# L 默认 long=+X, short=-Z
+	# NW 角：需 long=+X(东), short=+Z(南) → rotation_y = -PI/2
+	# NE 角：需 long=-X(西), short=+Z(南) → rotation_y = PI
+	# SW 角：需 long=+X(东), short=-Z(北) → rotation_y = 0
+	# SE 角：需 long=-X(西), short=-Z(北) → rotation_y = PI/2
+	match corner_id:
+		"NW": module.rotation.y = -PI * 0.5
+		"NE": module.rotation.y = PI
+		"SW": module.rotation.y = 0.0
+		"SE": module.rotation.y = PI * 0.5
+	module.set_meta("asset_id", "ENV-TOWER-CORNER-L-5M")
+	module.set_meta("tower_wall_corner", corner_id)
+	var corner_variant_index := 0 if corner_id in ["NW", "SE"] else 1
+	_apply_module_material_variant(module, corner_variant_index)
+	# Base99's active art layout owns the Blender corner visual. Keep this room
+	# module collision-only so its legacy visual cannot overlap the layout GLB.
+	if room_type == "FACILITY":
+		_set_corner_visual_visible(module, false)
+	parent.add_child(module)
+	# 必须在入父链之后再标：镜头避障标记按**世界延伸轴**判定（见
+	# _configure_corner_camera_collisions），未入父链时读不到整房旋转。
+	_configure_corner_camera_collisions(module)
+	return module
+
+
+func _get_wall_module_material(segment_index: int) -> StandardMaterial3D:
+	# 基地走专属尘深蓝墙（不分 A/B 段交替，整墙统一色）。
+	# 其他房间沿用塔楼暖色 A/B 段交替，保留模块拼接节奏。
+	if room_type == "FACILITY":
+		return FACILITY_WALL_MATERIAL
+	return WALL_SOLID_MATERIAL_A if segment_index % 2 == 0 else WALL_SOLID_MATERIAL_B
+
+
+func _apply_module_material_variant(module: Node, segment_index: int) -> void:
+	var variant := "A" if segment_index % 2 == 0 else "B"
+	var material := _get_wall_module_material(segment_index)
+	module.set_meta("segment_index", segment_index)
+	module.set_meta("material_variant", variant)
+	if bool(module.get_meta("preserve_authored_palette", false)):
+		return
+	if module is MeshInstance3D:
+		(module as MeshInstance3D).material_override = material
+	for child in module.get_children():
+		_apply_module_material_override(child, material)
+
+
+func _apply_module_material_override(root: Node, material: Material) -> void:
+	if root is MeshInstance3D:
+		(root as MeshInstance3D).material_override = material
+	for child in root.get_children():
+		_apply_module_material_override(child, material)
+
+
+func _set_corner_visual_visible(root: Node, is_visible: bool) -> void:
+	if root is GeometryInstance3D:
+		(root as GeometryInstance3D).visible = is_visible
+	for child in root.get_children():
+		_set_corner_visual_visible(child, is_visible)
+
+
+func _count_nodes_with_meta(root: Node, key: String, value: Variant) -> int:
+	var count := 1 if root.has_meta(key) and root.get_meta(key) == value else 0
+	for child in root.get_children():
+		count += _count_nodes_with_meta(child, key, value)
+	return count
+
+
+func _sum_int_meta_for_asset(root: Node, asset_id: String, key: String) -> int:
+	var total := 0
+	if root.get_meta("asset_id", "") == asset_id:
+		total += int(root.get_meta(key, 0))
+	for child in root.get_children():
+		total += _sum_int_meta_for_asset(child, asset_id, key)
+	return total
+
+
+func _count_nodes_with_meta_floor(
+	root: Node, key: String, value: Variant, floor_index: int
+) -> int:
+	var count := 0
+	if (
+		root.has_meta(key)
+		and root.get_meta(key) == value
+		and int(root.get_meta("floor_index", -1)) == floor_index
+	):
+		count = 1
+	for child in root.get_children():
+		count += _count_nodes_with_meta_floor(child, key, value, floor_index)
+	return count
+
+
+func _sum_int_meta_for_asset_floor(
+	root: Node, asset_id: String, key: String, floor_index: int
+) -> int:
+	var total := 0
+	if (
+		root.get_meta("asset_id", "") == asset_id
+		and int(root.get_meta("floor_index", -1)) == floor_index
+	):
+		total += int(root.get_meta(key, 0))
+	for child in root.get_children():
+		total += _sum_int_meta_for_asset_floor(child, asset_id, key, floor_index)
+	return total
+
+
+func _count_shadow_capable_lights() -> int:
+	var count := 0
+	for room_light in _room_lights:
+		if room_light != null and room_light.cast_shadow:
+			count += 1
+	return count
+
+
+func _count_active_shadow_lights() -> int:
+	var count := 0
+	for room_light in _room_lights:
+		if room_light == null:
+			continue
+		var snapshot := room_light.get_snapshot()
+		if bool(snapshot.get("shadow_enabled", false)):
+			count += 1
+	return count
+
+
+## 拐角 L 拼装：中间段碰撞（跳过两端拐角 + 门洞 span）
+func _add_corner_aware_solid_run_collision(
+	direction: String,
+	wall_offset: float,
+	inner_start: float,
+	inner_end: float,
+	has_door: bool,
+	door_index: int
+) -> void:
+	var body := StaticBody3D.new()
+	body.name = "TowerWallCollision_%s_Run" % direction.capitalize()
+	body.collision_layer = 1
+	body.collision_mask = 0
+	body.set_meta("camera_lower_wall", direction in ["north", "south"])
+	add_child(body)
+	var inner_length := inner_end - inner_start
+	if inner_length <= 0.0:
+		return
+	# 以 5m 网格从 inner_start 到 inner_end 划成连续段，门洞位置拆为左右两段
+	var segments: Array[Vector2] = []
+	segments.append(Vector2(inner_start, inner_end))
+	if has_door:
+		var door_offset_meta := "tower_wall_door_offset_%s" % direction
+		if has_meta(door_offset_meta):
+			var door_along := float(get_meta(door_offset_meta))
+			var door_left := door_along - TOWER_GEOMETRY.GRID_UNIT_M * 0.5
+			var door_right := door_along + TOWER_GEOMETRY.GRID_UNIT_M * 0.5
+			var new_segments: Array[Vector2] = []
+			for seg in segments:
+				var seg_start: float = seg.x
+				var seg_end: float = seg.y
+				if door_left < seg_end and door_right > seg_start:
+					if door_left > seg_start:
+						new_segments.append(Vector2(seg_start, minf(door_left, seg_end)))
+					if door_right < seg_end:
+						new_segments.append(Vector2(maxf(door_right, seg_start), seg_end))
+				else:
+					new_segments.append(seg)
+			segments = new_segments
+	for seg in segments:
+		var seg_start: float = seg.x
+		var seg_end: float = seg.y
+		if seg_end <= seg_start:
+			continue
+		_add_corner_aware_solid_segment_collision(
+			body, direction, wall_offset, seg_start, seg_end
+		)
+
+
+func _add_corner_aware_solid_segment_collision(
+	body: StaticBody3D,
+	direction: String,
+	wall_offset: float,
+	seg_start: float,
+	seg_end: float
+) -> void:
+	if room_type != "FACILITY" or direction != BASE_ROOFTOP_TRANSIT_DIRECTION:
+		_add_wall_run_box_collision(
+			body, direction, wall_offset, seg_start, seg_end,
+			TOWER_GEOMETRY.FLOOR_HEIGHT_M
+		)
+		return
+	var opening_half_width := TOWER_GEOMETRY.DOOR_CLEAR_WIDTH_M * 0.5
+	var opening_start := BASE_ROOFTOP_TRANSIT_CENTER_ALONG_M - opening_half_width
+	var opening_end := BASE_ROOFTOP_TRANSIT_CENTER_ALONG_M + opening_half_width
+	var overlap_start := maxf(seg_start, opening_start)
+	var overlap_end := minf(seg_end, opening_end)
+	if overlap_end <= overlap_start:
+		_add_wall_run_box_collision(
+			body, direction, wall_offset, seg_start, seg_end,
+			TOWER_GEOMETRY.FLOOR_HEIGHT_M
+		)
+		return
+	if seg_start < overlap_start:
+		_add_wall_run_box_collision(
+			body, direction, wall_offset, seg_start, overlap_start,
+			TOWER_GEOMETRY.FLOOR_HEIGHT_M
+		)
+	_add_wall_run_box_collision(
+		body, direction, wall_offset, overlap_start, overlap_end,
+		BASE_ROOFTOP_TRANSIT_COLLISION_TOP_M
+	)
+	if overlap_end < seg_end:
+		_add_wall_run_box_collision(
+			body, direction, wall_offset, overlap_end, seg_end,
+			TOWER_GEOMETRY.FLOOR_HEIGHT_M
+		)
+
+
+func _add_wall_run_box_collision(
+	body: StaticBody3D,
+	direction: String,
+	wall_offset: float,
+	seg_start: float,
+	seg_end: float,
+	height: float
+) -> void:
+	var run_length := seg_end - seg_start
+	if run_length <= 0.0 or height <= 0.0:
+		return
+	var along := (seg_start + seg_end) * 0.5
+	var position := Vector3.ZERO
+	var size := Vector3.ZERO
+	match direction:
+		"north":
+			position = Vector3(along, height * 0.5, -wall_offset)
+			size = Vector3(run_length, height, 0.30)
+		"south":
+			position = Vector3(along, height * 0.5, wall_offset)
+			size = Vector3(run_length, height, 0.30)
+		"west":
+			position = Vector3(-wall_offset, height * 0.5, along)
+			size = Vector3(0.30, height, run_length)
+		_:
+			position = Vector3(wall_offset, height * 0.5, along)
+			size = Vector3(0.30, height, run_length)
+	_add_collision_shape(body, position, size)
+
+
+func _add_tower_solid_run_collision(
+	direction: String,
+	length: float,
+	module_count: int,
+	door_index: int,
+	has_door: bool,
+	wall_offset: float
+) -> void:
+	# 5m 实心墙 prefab 自带 WallCollision，这里只用于门洞跨度的可视化标记。
+	var body := StaticBody3D.new()
+	body.name = "TowerWallCollision_%s_Run" % direction.capitalize()
+	body.collision_layer = 1
+	body.collision_mask = 0
+	add_child(body)
+	var runs: Array[Vector2i] = []
+	if not has_door:
+		runs.append(Vector2i(0, module_count))
+	else:
+		if door_index > 0:
+			runs.append(Vector2i(0, door_index))
+		if door_index + 1 < module_count:
+			runs.append(Vector2i(door_index + 1, module_count - door_index - 1))
+	for run in runs:
+		var run_length := float(run.y) * TOWER_GEOMETRY.GRID_UNIT_M
+		var along := (
+			-length * 0.5
+			+ TOWER_GEOMETRY.GRID_UNIT_M * (float(run.x) + float(run.y) * 0.5)
+		)
+		var position := Vector3.ZERO
+		var size := Vector3.ZERO
+		match direction:
+			"north":
+				position = Vector3(along, TOWER_GEOMETRY.FLOOR_HEIGHT_M * 0.5, -wall_offset)
+				size = Vector3(run_length, TOWER_GEOMETRY.FLOOR_HEIGHT_M, 0.30)
+			"south":
+				position = Vector3(along, TOWER_GEOMETRY.FLOOR_HEIGHT_M * 0.5, wall_offset)
+				size = Vector3(run_length, TOWER_GEOMETRY.FLOOR_HEIGHT_M, 0.30)
+			"west":
+				position = Vector3(-wall_offset, TOWER_GEOMETRY.FLOOR_HEIGHT_M * 0.5, along)
+				size = Vector3(0.30, TOWER_GEOMETRY.FLOOR_HEIGHT_M, run_length)
+			_:
+				position = Vector3(wall_offset, TOWER_GEOMETRY.FLOOR_HEIGHT_M * 0.5, along)
+				size = Vector3(0.30, TOWER_GEOMETRY.FLOOR_HEIGHT_M, run_length)
+		_add_collision_shape(body, position, size)
+
+
+func _add_tower_wall_collision(
+	direction: String,
+	module_position: Vector3,
+	rotation_y: float,
+	is_door_module: bool,
+	module_index: int
+) -> void:
+	# 5m 带门墙 prefab 自带 WallCollision；这里用 BoxShape3D 调整门洞两侧门柱+门楣的精确阻挡。
+	var body := StaticBody3D.new()
+	body.name = "TowerWallCollision_%s_I%02d" % [direction.capitalize(), module_index]
+	body.position = module_position
+	body.rotation.y = rotation_y
+	body.collision_layer = 1
+	body.collision_mask = 0
+	body.set_meta("camera_lower_wall", direction in ["north", "south"])
+	add_child(body)
+	if not is_door_module:
+		_add_collision_shape(
+			body,
+			Vector3(0.0, TOWER_GEOMETRY.FLOOR_HEIGHT_M * 0.5, 0.0),
+			Vector3(
+				TOWER_GEOMETRY.GRID_UNIT_M,
+				TOWER_GEOMETRY.FLOOR_HEIGHT_M,
+				0.30
+			)
+		)
+		return
+	if direction in ["north", "south"]:
+		_add_camera_only_door_wall_proxy(
+			direction, body.position, body.rotation.y, module_index
+		)
+	var pillar_width := (
+		TOWER_GEOMETRY.GRID_UNIT_M - TOWER_GEOMETRY.DOOR_CLEAR_WIDTH_M
+	) * 0.5
+	var pillar_center := (
+		TOWER_GEOMETRY.DOOR_CLEAR_WIDTH_M * 0.5 + pillar_width * 0.5
+	)
+	for x in [-pillar_center, pillar_center]:
+		_add_collision_shape(
+			body,
+			Vector3(x, TOWER_GEOMETRY.FLOOR_HEIGHT_M * 0.5, 0.0),
+			Vector3(pillar_width, TOWER_GEOMETRY.FLOOR_HEIGHT_M, 0.30)
+		)
+	_add_collision_shape(
+		body,
+		Vector3(
+			0.0,
+			TOWER_GEOMETRY.DOOR_CLEAR_HEIGHT_M
+			+ (TOWER_GEOMETRY.FLOOR_HEIGHT_M - TOWER_GEOMETRY.DOOR_CLEAR_HEIGHT_M) * 0.5,
+			0.0
+		),
+		Vector3(
+			TOWER_GEOMETRY.DOOR_CLEAR_WIDTH_M,
+			TOWER_GEOMETRY.FLOOR_HEIGHT_M - TOWER_GEOMETRY.DOOR_CLEAR_HEIGHT_M,
+			0.30
+		)
+	)
+
+
+func _add_camera_only_door_wall_proxy(
+	direction: String,
+	module_position: Vector3,
+	rotation_y: float,
+	module_index: int,
+	parent: Node = null
+) -> void:
+	# 门洞打开后不能放置世界层实体碰撞，否则会挡住角色与子弹。使用独立
+	# camera-only层覆盖完整5m门墙，仅供TowerDescent3D的镜头探针命中。
+	var proxy := StaticBody3D.new()
+	proxy.name = "CameraOnlyDoorWall_%s_I%02d" % [
+		direction.capitalize(),
+		module_index,
+	]
+	proxy.position = module_position
+	proxy.rotation.y = rotation_y
+	proxy.collision_layer = GameDesignConfig.COLLISION_LAYER_CAMERA_ONLY
+	proxy.collision_mask = 0
+	proxy.set_meta("camera_lower_wall", true)
+	proxy.set_meta("camera_only_door_wall", true)
+	proxy.set_meta("tower_wall_direction", direction)
+	(parent if parent != null else self).add_child(proxy)
+	_add_collision_shape(
+		proxy,
+		Vector3(0.0, TOWER_GEOMETRY.FLOOR_HEIGHT_M * 0.5, 0.0),
+		Vector3(
+			TOWER_GEOMETRY.GRID_UNIT_M,
+			TOWER_GEOMETRY.FLOOR_HEIGHT_M,
+			0.08
+		)
+	)
+
+
+func _add_collision_shape(body: StaticBody3D, local_position: Vector3, size: Vector3) -> void:
+	var shape := BoxShape3D.new()
+	shape.size = size
+	var collision := CollisionShape3D.new()
+	collision.position = local_position
+	collision.shape = shape
+	body.add_child(collision)
+
+
+func _build_floor_partitions(dimensions: Vector2) -> void:
+	var mirror := -1.0 if absi(room_seed) % 2 == 0 else 1.0
+	if room_type == "FACILITY":
+		# v0.1：30m基地中央必须保持通畅；设施全部沿墙摆放。
+		return
+	var partition_x := mirror * 4.8
+	for z in [-8.0, 7.5]:
+		_spawn_prefab(
+			"FloorPartitionVertical",
+			PARTITION_VERTICAL_PREFAB,
+			Vector3(partition_x, 1.4, z),
+			Vector3(0.28, 2.8, 8.0),
+			_wall_material
+		)
+	var partition_z := mirror * 6.2
+	for x in [-8.2, 8.2]:
+		var horizontal_partition := _spawn_prefab(
+			"FloorPartitionHorizontal",
+			PARTITION_HORIZONTAL_PREFAB,
+			Vector3(x, 1.4, partition_z),
+			Vector3(8.0, 2.8, 0.28),
+			_wall_material
+		)
+		# 内部横向隔墙没有north/south资产朝向；只要它位于角色与固定
+		# 后方镜头之间，就应与外围南墙执行同一套抬升收镜逻辑。
+		if horizontal_partition != null:
+			horizontal_partition.set_meta("camera_lower_wall_component", true)
+			_set_camera_lower_wall_on_static_bodies(horizontal_partition, true)
+
+
+## 该方向门洞沿墙的偏移（m）。0 = 墙面中心。
+##
+## 来源是**房间配置**（子图房按模板 `wall_lane_table` 写入 `wall_door_lane_<side>`），
+## 未声明的房间恒为 0 —— 主路、塔楼、基地的程序化房间行为逐字不变。
+## 门洞切口与门扇必须读同一个值，否则会出现「洞在左边、门扇在中间」。
+func _wall_door_lane(direction: String) -> float:
+	return float(get_meta("wall_door_lane_%s" % direction, 0.0))
+
+
+func _build_wall(
+	direction: String, center: Vector3, length: float, axis: Vector3, opening_lane_m: float = 0.0
+) -> void:
+	var has_door := doors.has(direction)
+	var thickness := 0.28
+	var height := 2.8
+	if not has_door:
+		var size := Vector3(length, height, thickness) if axis.x > 0.0 else Vector3(thickness, height, length)
+		var wall := _spawn_prefab(
+			"Wall_%s" % direction,
+			WALL_SEGMENT_PREFAB,
+			center,
+			size,
+			_wall_material
+		)
+		if wall != null and direction in ["north", "south"]:
+			_set_camera_lower_wall_on_static_bodies(wall, true)
+		return
+	var opening := TOWER_GEOMETRY.DOOR_CLEAR_WIDTH_M
+	# 门位沿墙偏移：模板 `wall_lane_table` 的合法槽位（05.2 §3.5.2）。
+	# 默认 0 = 墙面中心，与既有全部程序化房间逐字等价 —— 只有声明了 lane 的
+	# 房间（子图）才会偏离中心，主路/塔楼行为不变。
+	var lane := clampf(opening_lane_m, -(length - opening) * 0.5, (length - opening) * 0.5)
+	# 门洞两侧的墙段：按 lane 切成**不等长**两段（原实现恒为对称两段）。
+	var segment_lengths := [
+		lane + length * 0.5 - opening * 0.5,
+		length * 0.5 - lane - opening * 0.5,
+	]
+	for side_index in range(2):
+		var segment_length := float(segment_lengths[side_index])
+		if segment_length <= 0.05:
+			# lane 贴到墙角时一侧墙段长度为 0：不建零厚度墙件（会产生退化碰撞）。
+			continue
+		var segment_sign := -1.0 if side_index == 0 else 1.0
+		var offset_along := lane + segment_sign * (opening * 0.5 + segment_length * 0.5)
+		var offset: Vector3 = axis * offset_along
+		var segment_size := Vector3(segment_length, height, thickness) if axis.x > 0.0 else Vector3(thickness, height, segment_length)
+		var wall_segment := _spawn_prefab(
+			"Wall_%s" % direction,
+			WALL_DOOR_SEGMENT_PREFAB,
+			center + offset,
+			segment_size,
+			_wall_material
+		)
+		if wall_segment != null and direction in ["north", "south"]:
+			_set_camera_lower_wall_on_static_bodies(wall_segment, true)
+	var lintel_size := Vector3(opening, 0.45, thickness * 1.28) if axis.x > 0.0 else Vector3(thickness * 1.28, 0.45, opening)
+	var lintel := _spawn_prefab(
+		"DoorLintel_%s" % direction,
+		DOOR_LINTEL_PREFAB,
+		center + axis * lane + Vector3(0, 1.18, 0),
+		lintel_size,
+		_trim_material
+	)
+	if lintel != null and direction in ["north", "south"]:
+		_set_camera_lower_wall_on_static_bodies(lintel, true)
+
+
+func _hide_replaced_block00_wall_visuals(node: Node) -> void:
+	if node is GeometryInstance3D:
+		(node as GeometryInstance3D).visible = false
+	for child in node.get_children():
+		_hide_replaced_block00_wall_visuals(child)
+
+
+func _build_door(direction: String, target_room_id: String, dimensions: Vector2) -> void:
+	if _has_authoritative_door_ports():
+		for value in connection_ports:
+			var port := value as Dictionary
+			if str(port.get("side", "")) == direction and str(port.get("target_room_id", port.get("target", ""))) == target_room_id:
+				_build_door_for_port(port, dimensions)
+				return
+	if authored_layout_asset_id == "ENV-BATTLE-BLOCK00-ART-LAYOUT-3D" and Block00MasterOfficeLayout3D.is_removed_door_pair(room_id, target_room_id):
+		return
+	if not owns_door_endpoint(direction):
+		return
+	var door := DOOR_SCENE.instantiate() as RoomDoor3D
+	if door == null:
+		push_error("通用RoomDoor3D Prefab实例化失败")
+		return
+	# 门扇视觉二选一，两条都是正式美术，区别在语义而不是画质：
+	#   FACILITY（99F 基地）/ 和平区（区块00）—— 滑升门，自带独立 logic_id 与状态灯，
+	#   不随楼层主题换材质；
+	#   其余（普通战斗房 / BOSS 房 / 入口安全房）—— 塔楼 A 套门扇，与门墙共用 +Z 约定。
+	# 原先战斗房传 null 走程序化深色方块门板；2026-09-19 起统一换成正式门扇。
+	door.configure(
+		direction, target_room_id, theme.accent_color, _door_panel_visual(target_room_id)
+	)
+	door.set_access_policy(door_policies.get(direction, {}) as Dictionary)
+	door.set_meta("camera_lower_wall", direction in ["north", "south"])
+	# A 套门扇声明 visual_only 且不自带碰撞，本段对它是空跑。
+	# 保留为廉价保险：门扇包一旦又带上静态碰撞（B 套那个包就带），它不会随升降门
+	# 逻辑启用/禁用，必须让位给 RoomDoor3D 自己的升降碰撞，否则门永远开不了。
+	var door_leaf := door.get_node_or_null("DoorPanel/ImportedDoorVisual")
+	if door_leaf != null:
+		_disable_static_collision_descendants(door_leaf)
+	# 与 _build_tower_wall_run 同步：门偏移到沿墙中心最近模块位置 (5m 网格偶数段是 ±2.5m)。
+	# 子图房按模板 lane 声明（`wall_door_lane_<side>`）优先；未声明的房间回退塔楼旧键，
+	# 两者都没有就是 0（墙面中心），与既有全部程序化房间一致。
+	var door_offset_along := float(get_meta(
+		"wall_door_lane_%s" % direction,
+		get_meta("tower_wall_door_offset_%s" % direction, 0.0)
+	))
+	# 门扇停在墙件原点上：安全房墙件与塔楼墙件同样以原点坐边界网格线，门墙
+	# 门洞切向中心也是 0，门扇正好落在门垛之间，并和走廊起点同线。
+	var face_x := dimensions.x * 0.5
+	var face_z := dimensions.y * 0.5
+	match direction:
+		"north":
+			door.position = Vector3(door_offset_along, 0, -face_z)
+		"south":
+			door.position = Vector3(door_offset_along, 0, face_z)
+		"west":
+			door.position = Vector3(-face_x, 0, door_offset_along)
+			door.rotation.y = PI * 0.5
+		"east":
+			door.position = Vector3(face_x, 0, door_offset_along)
+			door.rotation.y = PI * 0.5
+	add_child(door)
+	_door_nodes[direction] = door
+
+
+func _sync_expedition_static_camera_door_proxies(static_layout: Node3D) -> void:
+	# 门槽在建壳前完成规划；这里只认已建好的唯一 owner 门，不使用烘焙门墙位置。
+	# 代理挂艺术根而非 DoorPanel，开门后仍覆盖原来的完整墙段。
+	var proxies: Dictionary = {}
+	for value in static_layout.find_children("*", "StaticBody3D", true, false):
+		var body := value as StaticBody3D
+		if not (
+			bool(body.get_meta("camera_only_door_wall", false))
+			or str(body.name).begins_with("CameraOnlyDoorWall_")
+		):
+			continue
+		var direction := str(body.get_meta("tower_wall_direction", ""))
+		var expected_name := "CameraOnlyDoorWall_%s_I00" % direction.capitalize()
+		if (
+			bool(body.get_meta("expedition_runtime_camera_door_proxy", false))
+			and body.get_parent() == static_layout
+			and str(body.name) == expected_name
+			and owns_door_endpoint(direction)
+			and _door_nodes.has(direction)
+			and not proxies.has(direction)
+		):
+			proxies[direction] = body
+			continue
+		# 旧烘焙空代理、非 owner 与重复代理立即退碰撞并离树，重复调用不会再认领。
+		body.collision_layer = 0
+		body.collision_mask = 0
+		_disable_static_collision_descendants(body)
+		body.get_parent().remove_child(body)
+		body.queue_free()
+	for direction_value in _door_nodes:
+		var direction := str(direction_value)
+		if not owns_door_endpoint(direction):
+			continue
+		var door := get_door_node(direction)
+		var proxy := proxies.get(direction) as StaticBody3D
+		if proxy == null:
+			_add_camera_only_door_wall_proxy(direction, Vector3.ZERO, 0.0, 0, static_layout)
+			proxy = static_layout.get_node("CameraOnlyDoorWall_%s_I00" % direction.capitalize()) as StaticBody3D
+			proxy.set_meta("expedition_runtime_camera_door_proxy", true)
+		proxy.transform = static_layout.global_transform.affine_inverse() * door.global_transform
+		proxy.collision_layer = GameDesignConfig.COLLISION_LAYER_CAMERA_ONLY
+		proxy.collision_mask = 0
+		proxy.set_meta("camera_only_door_wall", true)
+		proxy.set_meta("tower_wall_direction", direction)
+		proxy.set_meta("camera_lower_wall", _wall_runs_along_world_x(proxy))
+
+
+func _restore_static_layout_camera_wall_contract(static_layout: Node) -> void:
+	# 静态房间 TSCN 保留顶层 PackedScene 边界；生成时写入 prefab 内部
+	# StaticBody3D 的运行时 metadata 不会被固化。加载后重放该契约，
+	# 只复用既有碰撞，不生成第二套墙体代理。
+	#
+	# ⚠ 判据必须是**几何**（墙长轴是否沿世界 X），不能读 `tower_wall_direction`：
+	#
+	#   ① 该 meta 是**烘焙当时**的方向，房间整体旋转后即过期。随机拼接下每局朝向
+	#      不同（room_01 在各局取过 0 / 270 ...），±90° 会让南北墙与东西墙互换，
+	#      按 meta 标就会「该标的没标、不该标的标了」。
+	#   ② 即便不旋转，L 型房型的**内墙**也没有可用的 side —— 源清单只给外圈墙件
+	#      标了方位。实测 room_01 内侧横墙 `Y_*_35` 标的是 west，几何上却与南外墙
+	#      `Y_*_45` 同向（都沿世界 X 延伸）；它没被标记 ⇒ **镜头从那面墙穿出去**
+	#      （玩家在走廊北段时镜头后墙正是它）。这是进游戏肉眼可见的那一条。
+	#
+	# 转角模块本就走几何口径（`_configure_corner_camera_collisions`），这里对齐它。
+	for child in static_layout.get_children():
+		var corner_id := str(child.get_meta("tower_wall_corner", ""))
+		if not corner_id.is_empty():
+			_configure_corner_camera_collisions(child)
+			continue
+		if not (child is Node3D):
+			continue
+		var piece := child as Node3D
+		if not _is_static_layout_wall_piece(piece):
+			continue
+		_set_camera_lower_wall_on_static_bodies(
+			piece,
+			_wall_runs_along_world_x(piece)
+		)
+
+
+## 静态场景里的一件「墙」：只认**组件来源**，不认节点名。
+## 旧烘焙 `CameraOnlyDoorWall_*` 没有形状；运行时修复的代理以 `tower_wall_direction` 参与几何判定；
+## L 型房型的墙件名里编码的是烘焙时的世界坐标（`WALL_west_xm150_p87_5`），也不可靠。
+## 手工补墙生成的 `_SolidFill` 是 `duplicate()` 出来的独立节点，退回看生成器给墙件
+## 写的 `tower_wall_direction`（该 meta 只写给墙件）。
+func _is_static_layout_wall_piece(piece: Node3D) -> bool:
+	if piece.scene_file_path.is_empty():
+		return piece.has_meta("tower_wall_direction")
+	if _is_door_wall_piece(piece):
+		return true
+	return piece.scene_file_path.get_file().begins_with("wall")
+
+
+## 墙件长轴是否沿**世界 X** —— 只有这类墙会成为镜头后墙（面法线朝 ±Z，镜头沿
+## 玩家后方的世界 +Z 拉远，见 `TowerDescent3D._find_lower_camera_wall_distance`）。
+##
+## 取**碰撞盒**（BoxShape3D）的世界包围盒长边，而不是实例根自带的局部轴：不同族墙件的
+## 长边分别落在 local X（`wall_5m_a` 等）与 local Z（`wall_5m_d` 等），按族分支容易漏；
+## 统一取「世界水平包围盒较长的一边」就不必知道是哪一族。碰撞盒也正是镜头射线实际
+## 打到的形状，口径一致。
+##
+## 一件都取不到 BoxShape3D 时返回 false（不标）：宁可维持现状，也不凭猜测标记。
+func _wall_runs_along_world_x(piece: Node3D) -> bool:
+	var bounds := AABB()
+	var has_bounds := false
+	for value in piece.find_children("*", "CollisionShape3D", true, false):
+		var collision := value as CollisionShape3D
+		var box := collision.shape as BoxShape3D
+		if box == null:
+			continue
+		var shape_basis := collision.global_transform.basis
+		var half := box.size * 0.5
+		for sx in [-1.0, 1.0]:
+			for sy in [-1.0, 1.0]:
+				for sz in [-1.0, 1.0]:
+					var point: Vector3 = (
+						collision.global_transform.origin
+						+ shape_basis * (Vector3(sx, sy, sz) * half)
+					)
+					if not has_bounds:
+						bounds = AABB(point, Vector3.ZERO)
+						has_bounds = true
+					else:
+						bounds = bounds.expand(point)
+	if not has_bounds:
+		return false
+	return bounds.size.x >= bounds.size.z
+
+
+func _set_camera_lower_wall_on_static_bodies(root: Node, enabled: bool) -> void:
+	if root is StaticBody3D:
+		(root as StaticBody3D).set_meta("camera_lower_wall", enabled)
+	for child in root.get_children():
+		_set_camera_lower_wall_on_static_bodies(child, enabled)
+
+
+## L 型转角两条碰撞臂的镜头避障标记，按**世界延伸轴**判定：
+## 臂沿世界 X 延伸 = 南北向墙（玩家背后那一面）→ 标记；沿世界 Z 延伸 = 东西向墙 → 不标记。
+## 不能按「角位 id + 固定臂名」映射：整房旋转（安全房按门向转 90° 整数倍）之后两条臂的
+## 世界朝向会互换，写死的映射会同时产生「该标的没标（朝南处穿镜）」与「不该标的标了」。
+## 用父链累乘 basis 而不是 global_transform —— 后者在节点尚未入树时不级联父链。
+func _configure_corner_camera_collisions(module: Node) -> void:
+	var node := module as Node3D
+	if node == null:
+		return
+	var basis := _world_basis_of(node)
+	var long_along_world_x := absf(basis.x.x) >= absf(basis.x.z)
+	var short_along_world_x := absf(basis.z.x) >= absf(basis.z.z)
+	for value in module.find_children("*", "StaticBody3D", true, false):
+		var body := value as StaticBody3D
+		if body.name == "WallCollisionLong":
+			body.set_meta("camera_lower_wall", long_along_world_x)
+		elif body.name == "WallCollisionShort":
+			body.set_meta("camera_lower_wall", short_along_world_x)
+
+
+## 节点在房间根坐标系下的朝向（累乘父链 basis），不含父级缩放/剪切之外的运算。
+func _world_basis_of(node: Node3D) -> Basis:
+	var basis := node.transform.basis
+	var parent := node.get_parent()
+	while parent != null:
+		if parent is Node3D:
+			basis = (parent as Node3D).transform.basis * basis
+		parent = parent.get_parent()
+	return basis
+
+
+func _build_content() -> void:
+	# 内容生成使用独立稳定种子，卸载再载入后家具类型与搜索点不漂移。
+	_rng.seed = room_seed ^ 0x51A77E
+	var dimensions := get_dimensions()
+	_build_runtime_navigation_surface(dimensions)
+	_room_lights.clear()
+	# 静态布局若已把房间灯与墙面开关固化成 TSCN 节点（美术可在编辑器里手调位置与数值），
+	# 这里优先认领它们、不再自建。见 `_adopt_authored_room_devices()`。
+	var authored_devices := _adopt_authored_room_devices()
+	if size_class == "rooftop":
+		# 100F 天台是露天甲板：本房自带室外光照（TowerAtmosphere3D 的天光反弹 +
+		# 太阳 + 城市背景），室内玩法顶灯与墙边开关都属于程序生成室内设施的残留。
+		# 业主 2026-09-21 指出「天台为什么还会刷一个电灯开关」⇒ 顶灯与开关一并
+		# 清除：_room_lights 留空、_central_light 保持 null、开关节点不实例化。
+		# 下游读取点均已做保护（get_debug_snapshot 的两个布尔位、_apply_light_state、
+		# _bind_facility_presentation_light_control 与 _bind_light_switch_signal）。
+		pass
+	elif room_type == "FACILITY":
+		# 顶灯与开关已随壳体常驻（_ensure_facility_permanent_lighting）。
+		# detail 重建只重新登记常驻灯并绑定美术灯控，不重建实例。
+		if (
+			_central_light != null
+			and is_instance_valid(_central_light)
+			and not _room_lights.has(_central_light)
+		):
+			_room_lights.append(_central_light)
+	elif authored_devices:
+		# 中央顶灯（含大竞技场的四区灯）已是静态布局节点：只登记，不重建。
+		pass
+	elif room_type == "BOSS" and minf(dimensions.x, dimensions.y) >= 64.0:
+		# 90m终局竞技场不能依赖一盏超大范围点光源：四区灯具让中心与
+		# 四周都保持可读，同时仍由同一个墙边开关统一控制。
+		for light_index in range(4):
+			var x_sign := -1.0 if light_index % 2 == 0 else 1.0
+			var z_sign := -1.0 if light_index < 2 else 1.0
+			var arena_light := _create_room_light(
+				"ArenaCeilingLight_%02d" % (light_index + 1),
+				Vector3(
+					x_sign * dimensions.x * 0.24,
+					0.0,
+					z_sign * dimensions.y * 0.24
+				),
+				theme.fixture_energy * 2.40,
+				maxf(
+					theme.fixture_range * 1.72,
+					minf(dimensions.x, dimensions.y) * 0.58
+				),
+				room_seed + light_index * 19,
+				light_index == 0
+			)
+			_room_lights.append(arena_light)
+		_central_light = _room_lights[0]
+	else:
+		_central_light = _create_room_light(
+			"RoomCeilingLight",
+			# 包围盒中心对非矩形房是**凹口**（房外空地）：照原样落位等于把房间顶灯吊到房外。
+			# 真砖格上的房（矩形房 / 塔楼程序化房 / 无地砖清单的 v007 安全房）返回原值。
+			_snap_planar_position_into_footprint(Vector3.ZERO),
+			theme.fixture_energy * (
+				2.20 if size_class in ["large", "arena", "floor"] else 1.85
+			),
+			maxf(
+				theme.fixture_range * 1.72,
+				minf(dimensions.x, dimensions.y) * 0.94
+			),
+			room_seed,
+			true
+		)
+		_room_lights.append(_central_light)
+
+	if size_class != "rooftop" and room_type == "FACILITY":
+		# FACILITY 的开关已随壳体常驻；detail 重建只需把美术灯控
+		# （Art 节点此时已由 _install_facilities 装入）重新绑回开关。
+		# 🔴 必须跟随开关的**当前**状态，不能写死 true：开关自身状态在重建前后
+		# 不变 ⇒ _apply_pending_detail_runtime_state 不会发 light_toggled 纠正，
+		# 玩家关灯后离开再回来会看到美术灯（含手摆 OmniLight）自己亮回来。
+		_bind_facility_presentation_light_control(_facility_lights_currently_on())
+		_bind_light_switch_signal()
+	elif authored_layout_asset_id == "ENV-BATTLE-BLOCK00-ART-LAYOUT-3D" and authored_layout_room_id == "corridor":
+		# 第三间已拆除墙面灯开关；保留常亮照明，不再生成可交互开关。
+		for light in _room_lights:
+			light.set_light_enabled(true)
+	elif size_class != "rooftop":
+		# 房间声明的「初始灯亮」优先（开局第一间房），其次才是按房型的默认。
+		var starts_on := authored_room_light_on or room_type in ["STAIR_LOBBY", "BOSS"]
+		if not authored_room_light_switch:
+			# 常亮房（静态布局声明 `metadata/authored_room_light_switch = false`）：
+			# 既要**拆掉**已认领的静态开关（不拆就是「开关还在、只是不让点」），
+			# 也不走下面的自建分支；灯组一律点亮，灯型/数值一概不动。
+			_release_light_switches()
+			for light in _room_lights:
+				light.set_light_enabled(true)
+		else:
+			if _light_switch == null:
+				# 静态布局没有开关（程序化房 / 尚未迁移的旧静态布局）：沿用运行时自建
+				# 与包围盒落位。静态布局带开关时 `_adopt_authored_room_devices()` 已认领，
+				# 开关随壳体常驻，这里不再重复实例化、也不重复 add_child。
+				_light_switch = LIGHT_SWITCH_SCENE.instantiate() as RoomLightSwitch3D
+				_light_switch.name = "RoomLightSwitch3D"
+				_place_light_switch(_light_switch, dimensions)
+				_add_runtime_detail_child(_light_switch)
+			_light_switch.configure_group(_room_lights, starts_on)
+			_bind_light_switch_signal()
+	# 安全房原先还有程序画的地面标线 `_build_stair_lobby_markings()`：
+	# 正中一条 StairLobbyRouteGuide（13.00×0.035×1.20m）+ 两侧门内各一条
+	# StairLobbyThresholdGuide（0.26×0.045×4.2m），都是青色自发光、离地几厘米。
+	# 两批均已按需求整体移除，故这里不再调用。对应 prefab 常量与资产保留，
+	# 需要时可原样恢复。
+	if room_type == "BOSS":
+		_build_boss_arena_dressing()
+
+	var prop_count := (
+		3 if size_class in ["small", "tower_cell"]
+		else 5 if size_class == "medium"
+		else 7 if size_class in ["large", "floor"]
+		else 9
+	)
+	if size_class == "rooftop":
+		# 用户要求清空屋顶设施，包含程序生成的家具和可搜容器。
+		prop_count = 0
+	if room_type == "FACILITY":
+		prop_count = 0
+	if room_type == "STAIR_LOBBY":
+		prop_count = 0
+	if room_type == "BOSS":
+		# Boss 场地资产自身已提供可辨识掩体；不叠加随机家具破坏走位与主题构图。
+		prop_count = 0
+	if room_type in ["STORAGE", "SCAVENGE", "BASEMENT"]:
+		prop_count += 2
+	if authored_layout_asset_id == "ENV-BATTLE-BLOCK00-ART-LAYOUT-3D":
+		prop_count = 0
+	for index in range(prop_count):
+		# 可搜完全随机：每个 prop 独立 50/50。FACILITY / STAIR_LOBBY 在 prop_count=0
+		# 的分支里就已经退出，此处不再额外排除任何房间类型。
+		var is_search := search_facilities_enabled and _rng.randf() < 0.5
+		var prop := (SEARCH_SCENE if is_search else FURNITURE_SCENE).instantiate() as RoomFurniture3D
+		var type_options: Array[String] = theme.furniture_bias.duplicate()
+		if room_type == "STORAGE":
+			type_options.append_array(["locker", "shelf", "archive"])
+		elif room_type == "UPGRADE":
+			type_options.append_array(["workbench", "generator", "console"])
+		elif room_type == "TRAP":
+			type_options.append_array(["tank", "vat"])
+		var prop_type := type_options[_rng.randi_range(0, type_options.size() - 1)] if not type_options.is_empty() else "crate"
+		var prop_size := _choose_prop_size(index)
+		prop.configure({
+			"id": "%s_prop_%02d" % [room_id, index], "type": prop_type, "size": prop_size,
+			"searchable": is_search, "accent": theme.accent_color, "base_color": theme.prop_color,
+			"loot_value": 4 + theme.difficulty_rank * 2 + (6 if prop_size == "large" else 0),
+		})
+		var side := -1.0 if index % 2 == 0 else 1.0
+		var row := index / 2
+		var row_count := int(ceil(float(prop_count) / 2.0))
+		var row_ratio := 0.5 if row_count <= 1 else float(row) / float(row_count - 1)
+		var x_factor := 0.18 if size_class in ["large", "arena"] and row % 3 == 2 else 0.34
+		prop.position = Vector3(side * dimensions.x * x_factor, 0, lerpf(-dimensions.y * 0.28, dimensions.y * 0.28, row_ratio))
+		prop.rotation.y = 0.12 * side + PI * (1.0 if side > 0.0 else 0.0)
+		_add_runtime_detail_child(prop)
+		if is_search:
+			prop.searched.connect(_on_prop_searched)
+
+	if room_type in ["MERCHANT", "UPGRADE", "EVENT"]:
+		_create_service_station(room_type.to_lower(), dimensions)
+	if room_type in ["STAIRS_DOWN", "STAIRS_UP"]:
+		_build_vertical_access_marker(room_type)
+	if room_type == "TRAP":
+		var hazard := HAZARD_SCENE.instantiate() as HazardField3D
+		hazard.configure(
+			theme.hazard_color,
+			3.2 if size_class in ["large", "arena"] else 2.6,
+			6 + theme.difficulty_rank * 2
+		)
+		hazard.position = Vector3(0, 0.06, 0)
+		_add_runtime_detail_child(hazard)
+
+
+func _build_runtime_navigation_surface(dimensions: Vector2) -> void:
+	var authored_polygons := get_meta("walkable_navigation_polygons", []) as Array
+	if not authored_polygons.is_empty():
+		var authored_mesh := NavigationMesh.new()
+		var vertices := PackedVector3Array()
+		for polygon_value in authored_polygons:
+			var polygon := PackedInt32Array()
+			for point in polygon_value as Array:
+				polygon.append(vertices.size())
+				vertices.append(Vector3(point[0], point[1], point[2]))
+			authored_mesh.vertices = vertices
+			authored_mesh.add_polygon(polygon)
+		var authored_region := NavigationRegion3D.new()
+		authored_region.name = "RuntimeNavigationRegion3D"
+		authored_region.use_edge_connections = false
+		authored_region.navigation_mesh = authored_mesh
+		_add_runtime_detail_child(authored_region)
+		return
+	# 每个 ACTIVE 房只保留一块轻量导航面；正式门/跨房授权仍由房间系统拥有。
+	# 家具的短距避障交给 Enemy3D 射线兜底，避免运行时烘焙造成主线程尖峰。
+	var inset := 1.45
+	var half_x := maxf(1.0, dimensions.x * 0.5 - inset)
+	var half_z := maxf(1.0, dimensions.y * 0.5 - inset)
+	var navigation_mesh := NavigationMesh.new()
+	navigation_mesh.vertices = PackedVector3Array([
+		Vector3(-half_x, 0.08, -half_z),
+		Vector3(half_x, 0.08, -half_z),
+		Vector3(half_x, 0.08, half_z),
+		Vector3(-half_x, 0.08, half_z),
+	])
+	navigation_mesh.add_polygon(PackedInt32Array([0, 1, 2, 3]))
+	var region := NavigationRegion3D.new()
+	region.name = "RuntimeNavigationRegion3D"
+	region.use_edge_connections = false
+	region.navigation_mesh = navigation_mesh
+	_add_runtime_detail_child(region)
+
+
+## Reuse the existing RoomDoor3D for each connected endpoint. Imported preview leaves
+## become that door's visual children; closed preview collisions never remain stacked.
+func _adopt_static_port_door_visuals(static_layout: Node3D) -> void:
+	var contract := static_layout.get_meta("port_door_visuals", {}) as Dictionary
+	if contract.is_empty():
+		return
+	for source_name in contract.get("open_inner_previews", []) as Array:
+		var preview := static_layout.find_child(str(source_name), true, false) as Node3D
+		if preview != null and not preview.has_meta("connected_inner_preview_open"):
+			preview.position.y += 6.6
+			preview.set_meta("connected_inner_preview_open", true)
+			for body in preview.find_children("*", "StaticBody3D", true, false):
+				(body as StaticBody3D).collision_layer = 0
+	for side in ["west", "east", "north", "south"]:
+		if not contract.has(side):
+			continue
+		# 🔴 本侧可能**没有**自己的门节点：共享边是「一堵墙一道门」，由
+		# `door_endpoint_owners` 挑一端持有，另一端（本房）**委派**出去
+		# （`_build_door_for_port()` 的 `owns_door_endpoint(side)` 早退）。
+		# 旧实现遇到这种侧直接 `continue` ⇒ 美术门扇**永远不被认领**：它自带碰撞、
+		# 又是关着的，玩家在门口被永久挡死（实测远征01 换 Boss房02 后
+		# 「从 room_10 走不进 Boss 房」，门口前 0.62 m 停住；
+		# 99 恰好是 Boss 自己持有该侧，所以一直没暴露）。
+		# 故委派侧改为**认领到共享门**上：门扇随邻房那扇门一起开合，视觉与玩法一致。
+		var door := get_door_node(side)
+		if door == null:
+			door = _shared_door_for_side(side)
+			if door == null:
+				# 连共享门都找不到（邻房还没建好 / 该边根本没有门扇）：至少别让门扇挡死。
+				_disable_port_door_leaf_collision(static_layout, side)
+				continue
+		if bool(door.get_meta("authored_port_visual", false)):
+			continue
+		door.set_presentation_opening(5.02, 6.225)
+		var panel := door.get_node("DoorPanel") as Node3D
+		var old_visual := panel.get_node_or_null("ImportedDoorVisual")
+		if old_visual != null:
+			old_visual.free()
+		var imported := Node3D.new()
+		imported.name = "ImportedDoorVisual"
+		panel.add_child(imported)
+		for source_name in contract[side] as Array:
+			var leaf := static_layout.find_child(str(source_name), true, false) as Node3D
+			if leaf == null:
+				push_error("Authored port door leaf missing: %s" % source_name)
+				continue
+			leaf.reparent(imported, true)
+			for body in leaf.find_children("*", "StaticBody3D", true, false):
+				(body as StaticBody3D).collision_layer = 0
+		door.set_meta("authored_port_visual", true)
+
+
+## 本房**没有**该侧门节点时（共享边委派给邻房），去邻房取那扇共享门。
+## 判据与 `_bind_shared_edge_doors()` 同源：按端口而不是按方向取，一墙多门才不张冠李戴。
+func _shared_door_for_side(side: String) -> RoomDoor3D:
+	var target_id := str(door_targets.get(side, ""))
+	if target_id.is_empty():
+		return null
+	var block := get_parent()
+	if block == null:
+		return null
+	var peer := block.get_node_or_null(target_id) as DungeonRoom3D
+	if peer == null:
+		return null
+	var peer_port := peer.get_connection_port_towards(room_id)
+	var peer_port_id := str(peer_port.get("port_id", ""))
+	if not peer_port_id.is_empty():
+		var by_port := peer.get_door_node_by_port(peer_port_id)
+		if by_port != null:
+			return by_port
+	return peer.get_door_node(str(peer_port.get("side", "")))
+
+
+## 门扇无人认领时的兜底：**只关碰撞、不动位置**，保证门洞永远不会被永久堵死。
+func _disable_port_door_leaf_collision(static_layout: Node3D, side: String) -> void:
+	var contract := static_layout.get_meta("port_door_visuals", {}) as Dictionary
+	var names := contract.get(side, []) as Array
+	if names.is_empty():
+		return
+	for source_name in names:
+		var leaf := static_layout.find_child(str(source_name), true, false) as Node3D
+		if leaf == null:
+			continue
+		for body in leaf.find_children("*", "StaticBody3D", true, false):
+			(body as StaticBody3D).collision_layer = 0
+	push_warning(
+		"DungeonRoom3D: %s 的 %s 侧门扇没有门扇可认领（共享边已委派且邻房门未就绪），已仅关碰撞"
+		% [room_id, side]
+	)
+
+
+func _build_boss_arena_dressing() -> void:
+	var arena_scene_path := str(get_meta("arena_scene", ""))
+	var arena_asset_id := str(get_meta("arena_asset_id", ""))
+	# 普通Dungeon3D仍允许使用无独立场地的通用Boss回退；只有已经声明正式
+	# 场地资产ID却缺路径时才是内容错误。
+	if arena_scene_path.is_empty() and arena_asset_id.is_empty():
+		return
+	if arena_scene_path.is_empty() or not ResourceLoader.exists(arena_scene_path):
+		push_warning("DungeonRoom3D: Boss room %s has no valid arena scene: %s" % [room_id, arena_scene_path])
+		return
+	var packed := load(arena_scene_path) as PackedScene
+	if packed == null:
+		push_error("DungeonRoom3D: failed to load Boss arena scene %s" % arena_scene_path)
+		return
+	var arena := packed.instantiate() as Node3D
+	if arena == null:
+		push_error("DungeonRoom3D: Boss arena root must be Node3D: %s" % arena_scene_path)
+		return
+	arena.name = "BossArenaDressing"
+	arena.set_meta("asset_id", str(get_meta("arena_asset_id", "")))
+	arena.set_meta("high_detail_streamable", true)
+	_add_runtime_detail_child(arena)
+
+	# 美术掩体随高模场地装饰一同流式装卸，但碰撞与造型位置逐件对应，避免
+	# 只看得到/撞不到或看不到/仍挡路。永久墙体碰撞不走这条高模流式路径。
+	var asset_id := arena_asset_id
+	var count := 8 if asset_id.ends_with("ARCHIVE-95") else 6 if asset_id.ends_with("FURNACE-90") else 5
+	var radius := 7.8 if count != 5 else 6.5
+	var phase_offset := 0.22 if count == 8 else 0.28 if count == 6 else 0.30
+	var cover_size := Vector3(3.6, 1.3, 1.1) if count == 8 else Vector3(4.4, 1.5, 0.84) if count == 6 else Vector3(3.2, 1.4, 0.96)
+	for index in range(count):
+		var angle := TAU * float(index) / float(count) + phase_offset
+		var body := StaticBody3D.new()
+		body.name = "BossArenaCoverCollision_%02d" % index
+		body.position = Vector3(cos(angle) * radius, cover_size.y * 0.5, sin(angle) * radius)
+		body.rotation.y = -TAU * float(index) / float(count)
+		body.set_meta("boss_arena_cover", true)
+		_add_collision_shape(body, Vector3.ZERO, cover_size)
+		_add_runtime_detail_child(body)
+
+
+func _create_service_station(type_id: String, dimensions: Vector2) -> ServiceStation3D:
+	var station := SERVICE_SCENE.instantiate() as ServiceStation3D
+	if station == null:
+		push_error("DungeonRoom3D: failed to instantiate required %s station in %s" % [type_id, room_id])
+		return null
+	var title: String = str({
+		"merchant": "拾荒商终端",
+		"upgrade": "武器改造台",
+		"event": "异常信号终端",
+	}.get(type_id, "废土终端"))
+	station.configure(type_id, title, theme.accent_color)
+	# 必做目标不能贴在镜头会裁切的北墙。事件终端放到房间中部安全区，
+	# 同时避开出生点圆环和两侧家具，保证所有 30×25m 以上房型都可接近。
+	var forward_offset := minf(4.5, dimensions.y * 0.18)
+	station.position = Vector3(0, 0, -forward_offset)
+	station.set_meta("required_room_objective", type_id == "event")
+	_add_runtime_detail_child(station)
+	station.activated.connect(_on_service_activated)
+	return station
+
+
+func _create_room_light(
+	node_name: String,
+	planar_position: Vector3,
+	p_energy: float,
+	p_range: float,
+	seed: int,
+	shadow: bool
+) -> WastelandLight3D:
+	var room_light := LIGHT_SCENE.instantiate() as WastelandLight3D
+	room_light.name = node_name
+	room_light.position = planar_position
+	room_light.configure(
+		theme.key_light_color,
+		p_energy,
+		p_range,
+		seed,
+		shadow,
+		false,
+		"ceiling",
+	)
+	if tower_module_shell:
+		# 灯具自身的顶装高度是 2.72m；整体抬升后与 9m 天花板贴合。
+		room_light.position.y = TOWER_GEOMETRY.FLOOR_HEIGHT_M - 2.72
+	room_light.set_light_enabled(false)
+	_add_runtime_detail_child(room_light)
+	room_light.add_to_group("wasteland_light_3d")
+	return room_light
+
+
+# ── 非矩形房（L 型 / U 型 / 工字桥）的落位真源：真砖格 ──────────────────────────
+# 包围盒中心与包围盒墙面都落在**凹口**上，而凹口在摆位阶段就被 `point_in_polygon` 剔掉了砖
+# —— 那里既没有地砖也没有墙。顶灯与墙面开关原先按包围盒落位，于是「灯吊在房外、开关悬在
+# 凹口里」：房间天然偏暗，玩家在房内又永远进不了 `RoomLightSwitch3D.INTERACTION_RANGE`
+# 2.2m 的交互球 ⇒ 表现就是「房间里的开关开不了灯」。`_build_spawn_points()` 早已改用真砖
+# 格，这里补齐同一口径。落点本来就在真砖格上时函数**逐字返回原值** ⇒ 矩形房 / 塔楼程序化
+# 房 / v007 安全房（无地砖清单）行为完全不变。
+func _snap_planar_position_into_footprint(planar_position: Vector3) -> Vector3:
+	if _inside_authored_footprint(planar_position) or _authored_tile_cells.is_empty():
+		return planar_position
+	# 先试真砖格质心 ≈ 可走区的几何中心：凹口是挖掉的，质心通常仍在砖上，灯挂这里覆盖最匀。
+	# 极端细长 L 的质心可能又落回空处，此时才退到最近的砖心（必在砖上）。
+	var centroid := Vector3.ZERO
+	for cell in _authored_tile_cells:
+		centroid += cell
+	centroid /= float(_authored_tile_cells.size())
+	if _inside_authored_footprint(centroid):
+		return Vector3(centroid.x, planar_position.y, centroid.z)
+	var nearest := _nearest_authored_cell(planar_position)
+	return Vector3(nearest.x, planar_position.y, nearest.z)
+
+
+func _nearest_authored_cell(planar_position: Vector3) -> Vector3:
+	var nearest := Vector3.ZERO
+	var nearest_distance := INF
+	for cell in _authored_tile_cells:
+		var offset := Vector2(cell.x - planar_position.x, cell.z - planar_position.z)
+		var distance := offset.length_squared()
+		if distance < nearest_distance:
+			nearest_distance = distance
+			nearest = cell
+	return nearest
+
+
+## side 0/1 = 本地 −Z/+Z 墙，side 2/3 = 本地 −X/+X 墙（与 `_place_light_switch` 同一套）。
+## 返回该侧**真脚**那一行的砖格：凹口侧的假墙行里根本没有砖，自然被排除。
+func _authored_extreme_cell_row(side: int) -> Array[Vector3]:
+	var row: Array[Vector3] = []
+	if _authored_tile_cells.is_empty():
+		return row
+	var extreme := 0.0
+	var has_extreme := false
+	for cell in _authored_tile_cells:
+		var axis := _side_axis_value(cell, side)
+		if not has_extreme:
+			extreme = axis
+			has_extreme = true
+		elif side == 0 or side == 2:
+			extreme = minf(extreme, axis)
+		else:
+			extreme = maxf(extreme, axis)
+	for cell in _authored_tile_cells:
+		if absf(_side_axis_value(cell, side) - extreme) <= AUTHORED_TILE_HIT_TOLERANCE_M:
+			row.append(cell)
+	return row
+
+
+func _side_axis_value(cell: Vector3, side: int) -> float:
+	return cell.z if side < 2 else cell.x
+
+
+## 开关落位：落点不在真砖格上，说明这面墙是包围盒假墙 ⇒ 改贴该侧**真脚**的实体墙。
+## 在该行里挑最靠中间的一格（不把开关挤在凹角上），墙皮取该行砖格的外边缘再内缩
+## `SWITCH_WALL_INSET_M` ⇒ 落点必在砖上，玩家站上该砖即可进入交互半径。
+func _resolve_light_switch_position(side: int, fallback: Vector3) -> Vector3:
+	if _inside_authored_footprint(fallback):
+		return fallback
+	var row := _authored_extreme_cell_row(side)
+	if row.is_empty():
+		return fallback
+	var lateral_mean := 0.0
+	for cell in row:
+		lateral_mean += cell.x if side < 2 else cell.z
+	lateral_mean /= float(row.size())
+	var chosen: Vector3 = row[0]
+	var chosen_distance := INF
+	for cell in row:
+		var lateral := cell.x if side < 2 else cell.z
+		var distance := absf(lateral - lateral_mean)
+		if distance < chosen_distance:
+			chosen_distance = distance
+			chosen = cell
+	var inset := AUTHORED_TILE_HALF_M - SWITCH_WALL_INSET_M
+	match side:
+		0:
+			return Vector3(chosen.x, 0.0, chosen.z - inset)
+		1:
+			return Vector3(chosen.x, 0.0, chosen.z + inset)
+		2:
+			return Vector3(chosen.x - inset, 0.0, chosen.z)
+		_:
+			return Vector3(chosen.x + inset, 0.0, chosen.z)
+
+
+func _place_light_switch(light_switch: RoomLightSwitch3D, dimensions: Vector2) -> void:
+	if room_type == "FACILITY":
+		# 基地开关放在西侧入口门北面紧邻的第一段5m墙上：
+		# 从该墙段的南边向北取 1/3，保留门洞与开关的分离。
+		var west_door := get_door_node("west")
+		var west_door_along := west_door.position.z if west_door != null else -2.5
+		var wall_unit := TOWER_GEOMETRY.GRID_UNIT_M
+		var north_wall_south_edge := west_door_along - wall_unit * 0.5
+		light_switch.position = Vector3(
+			-dimensions.x * 0.5 + 0.34,
+			0.0,
+			north_wall_south_edge - wall_unit / 3.0,
+		)
+		light_switch.rotation.y = -PI * 0.5
+		light_switch.set_meta("facility_entry_switch_clearance_m", wall_unit * 0.5)
+		light_switch.set_meta("facility_entry_direction", "west_entry_north_first_wall")
+		return
+	var side: int = absi(room_seed) % 4
+	var x_margin := minf(4.2, dimensions.x * 0.22)
+	var z_margin := minf(4.2, dimensions.y * 0.22)
+	match side:
+		0:
+			light_switch.position = Vector3(x_margin, 0, -dimensions.y * 0.5 + 0.34)
+			light_switch.rotation.y = 0.0
+		1:
+			light_switch.position = Vector3(-x_margin, 0, dimensions.y * 0.5 - 0.34)
+			light_switch.rotation.y = PI
+		2:
+			light_switch.position = Vector3(-dimensions.x * 0.5 + 0.34, 0, z_margin)
+			light_switch.rotation.y = -PI * 0.5
+		_:
+			light_switch.position = Vector3(dimensions.x * 0.5 - 0.34, 0, -z_margin)
+			light_switch.rotation.y = PI * 0.5
+	# 上面四个候选面都是按**包围盒**算的：非矩形房凹口侧的「墙」在房外，开关会悬在空地
+	# 上且够不到。落点不在真砖格上就改贴该侧真脚的实体墙（旋转沿用同一面墙，无需改）。
+	light_switch.position = _resolve_light_switch_position(side, light_switch.position)
+
+
+func _build_vertical_access_marker(type_id: String) -> void:
+	var up := type_id != "STAIRS_DOWN"
+	var step_material := _material(theme.trim_color.lightened(0.08), 0.68, 0.48)
+	for index in range(6):
+		var step_height := 0.12 + index * 0.13 if up else 0.77 - index * 0.13
+		_spawn_prefab("AccessStep", ACCESS_STEP_PREFAB, Vector3(0, step_height * 0.5, -2.2 + index * 0.75), Vector3(3.0, step_height, 0.72), step_material)
+	var label_instance := VERTICAL_ACCESS_LABEL_PREFAB.instantiate() as Node3D
+	label_instance.name = "VerticalAccessMarkerLabel"
+	label_instance.position = Vector3(0, 2.2, 0)
+	var label3d := label_instance.get_node("VerticalAccessLabel") as Label3D
+	if label3d != null:
+		label3d.text = "电梯 / 垂直层" if type_id == "ELEVATOR" else "上层" if up else "地下层"
+		label3d.modulate = theme.accent_color.lightened(0.18)
+	_add_runtime_detail_child(label_instance)
+
+
+func _choose_prop_size(index: int) -> String:
+	if size_class == "small":
+		return "small" if index % 3 != 0 else "medium"
+	if size_class == "large":
+		return ["small", "medium", "large"][index % 3]
+	if size_class == "arena":
+		return ["medium", "large", "small"][index % 3]
+	return "medium" if index % 3 != 0 else "small"
+
+
+func _build_trigger() -> void:
+	var dimensions := get_dimensions()
+	var area := Area3D.new()
+	area.name = "RoomTrigger"
+	area.collision_layer = 0
+	area.collision_mask = 1
+	add_child(area)
+	var shape := BoxShape3D.new()
+	var min_local_y := -1.0 if room_type == "FACILITY" else ROOM_OWNERSHIP_MIN_LOCAL_Y_M
+	var max_local_y := (
+		TOWER_GEOMETRY.FLOOR_HEIGHT_M + 0.8
+		if room_type == "FACILITY"
+		else ROOM_OWNERSHIP_MAX_LOCAL_Y_M
+	)
+	var trigger_height := max_local_y - min_local_y
+	for polygon_value in get_meta("walkable_navigation_polygons", []):
+		for point_value in polygon_value:
+			max_local_y = maxf(max_local_y, float(point_value[1]) + ROOM_OWNERSHIP_MAX_LOCAL_Y_M)
+	trigger_height = max_local_y - min_local_y
+	shape.size = Vector3(
+		maxf(0.01, dimensions.x - ROOM_OWNERSHIP_BOUNDARY_INSET_M * 2.0),
+		trigger_height,
+		maxf(0.01, dimensions.y - ROOM_OWNERSHIP_BOUNDARY_INSET_M * 2.0)
+	)
+	var collision := CollisionShape3D.new()
+	collision.position.y = (min_local_y + max_local_y) * 0.5
+	collision.shape = shape
+	area.add_child(collision)
+	area.body_entered.connect(_on_room_body_entered)
+
+
+## floor_tile 的源槽位可能带原始高度，但装配函数把顶面吸到 Y=0。
+## 坑底保留 -12m 且 slot_role=multi_level_component，不得混入主通行层。
+func _build_spawn_points() -> void:
+	enemy_spawn_points.clear()
+	_authored_tile_cells.clear()
+	_spawn_candidates.clear()
+	_spawn_edge_candidates.clear()
+	for value in authored_layout_instances:
+		var instance := value as Dictionary
+		if str(instance.get("slot_role", "")) != "floor_tile":
+			continue
+		var cell := instance.get("position", Vector3.ZERO) as Vector3
+		cell.y = 0.0
+		if not _authored_tile_cells.has(cell):
+			_authored_tile_cells.append(cell)
+	var rng := RandomNumberGenerator.new()
+	rng.seed = room_seed ^ room_id.hash() ^ 0x53504157
+	var dimensions := get_dimensions()
+	var cells: Array[Vector3] = _authored_tile_cells.duplicate()
+	# 🔴 没有地砖清单就退回**包围盒网格**（原先只对「非授权壳」兜底，锚定房会因此
+	# **一个落点都没有**）。为什么锚定房会没有清单：`anchor_policy = static_port_layout`
+	# 的房（Boss 房深井 / 撤离房）在生成器里被整体跳过 `authored_layout_instances`，
+	# 而它的美术由静态场景独占 ⇒ 清单恒空。
+	# 后果链（实测远征01 换上 Boss房02 后）：0 落点 → `_collect_box_stage_entries` 拿不到
+	# 可用点 → 0 波怪 → `spawn_boxes_only` 判「没盒子就不刷」→ **房间开局即肃清、没有首领**，
+	# 而门控的「首领一死就开闸」因此永远等不到首领。
+	if cells.is_empty():
+		for x in range(ceili(dimensions.x / 5.0)):
+			for z in range(ceili(dimensions.y / 5.0)):
+				cells.append(Vector3(-dimensions.x * 0.5 + 2.5 + x * 5.0, 0, -dimensions.y * 0.5 + 2.5 + z * 5.0))
+	# 每砖分层抖动，不按扇区取最远点；使用独立随机流，不扰动家具和编成。
+	for cell in cells:
+		for x in 3:
+			for z in 3:
+				var point := cell + Vector3((x - 1) * 1.5 + rng.randf_range(-0.65, 0.65), 0, (z - 1) * 1.5 + rng.randf_range(-0.65, 0.65))
+				if _spawn_floor_contains(point, _spawn_clearance()):
+					_spawn_candidates.append(point)
+	# Fisher-Yates：顺序本身承载随机优先级，避免取最大距离又退化成固定四角。
+	for i in range(_spawn_candidates.size() - 1, 0, -1):
+		var j := rng.randi_range(0, i)
+		var point := _spawn_candidates[i]
+		_spawn_candidates[i] = _spawn_candidates[j]
+		_spawn_candidates[j] = point
+	for point in _spawn_candidates:
+		_spawn_edge_candidates.append(not _spawn_floor_contains(point, _spawn_clearance() + 3.0))
+
+
+func _spawn_clearance() -> float:
+	return SPAWN_BOSS_CLEARANCE_M if room_type == "BOSS" else SPAWN_CLEARANCE_M
+
+
+## 完整包围正方形都须被主层地砖并集覆盖（比圆形占地更保守，也覆盖凹角）。
+func _spawn_floor_contains(point: Vector3, radius: float) -> bool:
+	var footprint := Rect2(Vector2(point.x - radius, point.z - radius), Vector2.ONE * radius * 2.0)
+	var dimensions := get_dimensions()
+	if not Rect2(-dimensions * 0.5, dimensions).encloses(footprint):
+		return false
+	# 没有地砖清单 ⇒ 唯一可用的口径就是房间包围盒（与 `_build_spawn_points` 的兜底同源）。
+	# 判据只看「清单是否为空」，**不看是不是授权壳**：授权锚定房（Boss 房深井 / 撤离房）
+	# 的美术由静态场景独占、清单恒空，按旧条件会对**每个点**都返回 false ⇒ 零落点。
+	if _authored_tile_cells.is_empty():
+		return true
+	var covered := 0.0
+	for cell in _authored_tile_cells:
+		var tile := Rect2(Vector2(cell.x - 2.5, cell.z - 2.5), Vector2(5.0, 5.0))
+		if tile.intersects(footprint):
+			covered += tile.intersection(footprint).get_area()
+	return covered >= footprint.get_area() - 0.0001
+
+
+## 同帧 ensure_detail_built 后物理空间可能尚未同步，直接读取实体碰撞形状的变换。
+## 保守 AABB 也支持家具旋转；不把 Area3D 交互盒、camera-only 或地板当作障碍。
+func _collect_spawn_blockers() -> void:
+	_spawn_blockers.clear()
+	# 共墙和 L 角可能由邻房拥有；按空间相交收集，而不是仅查本房子树。
+	var dimensions := get_dimensions()
+	var room_bounds := AABB(Vector3(-dimensions.x * 0.5, 0.05, -dimensions.y * 0.5), Vector3(dimensions.x, SPAWN_BODY_HEIGHT_M, dimensions.y)).grow(_spawn_clearance())
+	var root: Node = get_parent() if get_parent() != null else self
+	for value in root.find_children("*", "CollisionShape3D", true, false):
+		var collision := value as CollisionShape3D
+		var body := collision.get_parent() as StaticBody3D
+		if body == null or (body.collision_layer & 1) == 0 or collision.disabled or collision.shape == null:
+			continue
+		var bounds := global_transform.affine_inverse() * collision.global_transform * collision.shape.get_debug_mesh().get_aabb()
+		if bounds.end.y <= 0.05 or bounds.position.y >= SPAWN_BODY_HEIGHT_M or not room_bounds.intersects(bounds):
+			continue
+		_spawn_blockers.append(bounds)
+
+
+func _spawn_obstacle_free(point: Vector3) -> bool:
+	var radius := _spawn_clearance()
+	for bounds in _spawn_blockers:
+		if Rect2(Vector2(bounds.position.x, bounds.position.z), Vector2(bounds.size.x, bounds.size.z)).grow(radius).has_point(Vector2(point.x, point.z)):
+			return false
+	return true
+
+
+## 剧情主层落点：复用地砖覆盖和实际设施障碍，额外验证同层物理承重。
+## 搜索仅在请求附近进行；绝不把楼下地面或房间中心当作兜底。
+func resolve_narrative_floor_positions(
+	requested: Array[Vector3], occupied: Array[Vector3], max_adjustment_m: float = 12.0
+) -> Array[Vector3]:
+	_prepare_narrative_spawn_space()
+	var result: Array[Vector3] = []
+	var used := occupied.duplicate()
+	for requested_world in requested:
+		var origin := to_local(requested_world)
+		origin.y = 0.0
+		var candidates: Array[Vector3] = [origin]
+		var nearby: Array[Vector3] = []
+		for candidate in _spawn_candidates:
+			if candidate.distance_squared_to(origin) <= max_adjustment_m * max_adjustment_m:
+				nearby.append(candidate)
+		nearby.sort_custom(func(a: Vector3, b: Vector3) -> bool:
+			return a.distance_squared_to(origin) < b.distance_squared_to(origin))
+		candidates.append_array(nearby)
+		var chosen := Vector3.INF
+		for candidate in candidates:
+			if not _spawn_floor_contains(candidate, _spawn_clearance()) or not _spawn_obstacle_free(candidate):
+				continue
+			var world_point := to_global(candidate)
+			var separated := true
+			for previous in used:
+				if absf(previous.y - world_point.y) < 1.0 and Vector2(previous.x - world_point.x, previous.z - world_point.z).length() < _spawn_clearance() * 2.0 + .1:
+					separated = false
+					break
+			if not separated:
+				continue
+			if not _narrative_floor_supported(world_point):
+				continue
+			chosen = world_point + Vector3.UP * .05
+			break
+		if not chosen.is_finite():
+			return [] # 整批拒绝，调用方不得记生成幂等键。
+		result.append(chosen)
+		used.append(chosen)
+	return result
+
+
+func _prepare_narrative_spawn_space() -> void:
+	ensure_shell_built()
+	ensure_detail_built()
+	var frame := Engine.get_physics_frames()
+	var detail_id := _detail_root.get_instance_id() if is_instance_valid(_detail_root) else 0
+	if _narrative_spawn_probe_frame != frame or _narrative_spawn_detail_id != detail_id:
+		_collect_spawn_blockers()
+		_narrative_spawn_probe_frame = frame
+		_narrative_spawn_detail_id = detail_id
+
+
+func is_narrative_floor_position_valid(world_point: Vector3) -> bool:
+	_prepare_narrative_spawn_space()
+	var local := to_local(world_point)
+	if absf(local.y) > .15:
+		return false
+	local.y = 0.0
+	return _spawn_floor_contains(local, _spawn_clearance()) and _spawn_obstacle_free(local) and _narrative_floor_supported(to_global(local))
+
+
+func _narrative_floor_supported(world_point: Vector3) -> bool:
+	var world := get_world_3d()
+	if world == null:
+		return false
+	var radius := _spawn_clearance()
+	for offset in [Vector3.ZERO, Vector3(radius, 0, radius), Vector3(radius, 0, -radius), Vector3(-radius, 0, radius), Vector3(-radius, 0, -radius)]:
+		var point: Vector3 = world_point + offset
+		var query := PhysicsRayQueryParameters3D.create(point + Vector3.UP * .35, point + Vector3.DOWN * .35, 1)
+		query.collide_with_areas = false
+		query.hit_back_faces = true
+		var hit := world.direct_space_state.intersect_ray(query)
+		if hit.is_empty() or (hit.get("normal", Vector3.ZERO) as Vector3).y < .7:
+			return false
+		if absf((hit["position"] as Vector3).y - world_point.y) > .15:
+			return false
+	return true
+
+
+## 每批 index=0 刷新实体障碍；后续波共用同一安全算法。任何索引都不做旋转/缩放。
+func spawn_point_for_index(index: int) -> Vector3:
+	var safe_index := maxi(0, index)
+	if safe_index == 0 or enemy_spawn_points.is_empty():
+		enemy_spawn_points.clear()
+		_collect_spawn_blockers()
+		_spawn_available.clear()
+		for i in _spawn_candidates.size():
+			if _spawn_obstacle_free(_spawn_candidates[i]):
+				_spawn_available.append(i)
+	var target := mini(safe_index, SPAWN_MAX_POINTS - 1)
+	var local_points: Array[Vector3] = []
+	for previous in enemy_spawn_points:
+		local_points.append(to_local(previous))
+	while enemy_spawn_points.size() <= target:
+		var chosen := -1
+		var best_score := -1.0
+		var separation := maxf(_spawn_clearance() * 2.0 + 0.1, get_dimensions().length() * 0.22)
+		for i in _spawn_available:
+			var point := _spawn_candidates[i]
+			var distance := separation
+			for previous in local_points:
+				distance = minf(distance, point.distance_to(previous))
+			if distance < 0.01:
+				continue
+			var score := distance
+			# 优先真实边缘，但不能为贴边而堆叠；边缘容不下时自动向内部扩展。
+			if _spawn_edge_candidates[i] and distance >= _spawn_clearance() * 2.0 + 0.1:
+				score += separation
+			if score > best_score:
+				chosen = i
+				best_score = score
+		if chosen < 0:
+			push_error("DungeonRoom3D: 房间 %s 没有可用刷怪落点（index=%d）" % [room_id, safe_index])
+			return Vector3.INF
+		local_points.append(_spawn_candidates[chosen])
+		enemy_spawn_points.append(to_global(_spawn_candidates[chosen]))
+	return enemy_spawn_points[target]
+
+
+## —— 触发盒落点（触发器刷怪设计 §4）——
+## 候选池限定在**盒内**：
+##   ① 盒心先**吸附到地砖格心**并强制离墙内缩 `wall_recess_tiles` 圈（见 `snap_box_center_to_tile`）；
+##   ② 盒尺寸夹到下限 `SPAWN_BOX_MIN_SIZE_M`（2×2 m）；
+##   ③ 候选由**盒自己**按 `SPAWN_BOX_SAMPLE_STEP_M` 网格采样（盒局部系步进），
+##      逐个过「地砖覆盖 + 离墙净距」与「实体障碍」两道闸；
+##   ④ **带种子随机**取点 + **间距硬下限** = `spacing`，排不下就少出（绝不把两只怪塞到同一处）。
+##
+## 参数：`box_center_local` = 盒心**房间局部坐标 (x, z)**；`box_size` = (width, depth)；
+## `box_rotation_deg` = 盒自身绕 Y 轴的姿态（与房间姿态自动叠加，因为出入都走 to_global/to_local）；
+## `wall_recess_tiles` = 盒心离房墙内缩圈数（1 圈 = 5 m，0 = 允许贴墙）。
+## 返回 `count` 个**世界坐标**；取不满时尾部补 `Vector3.INF`。
+## ⚠ 调用方必须**按有限点截断**（`Dungeon3D._collect_box_stage_entries` 就是这么做的）：
+## 把 `Vector3.INF` 直接喂给 `_spawn_enemy_batch` 会让整批判「无合法落点」并把本房波次锁死。
+## 本函数不替调用方决定降级策略，但绝不用非法坐标或房间中心糊弄过去。
+func spawn_points_in_box(
+	box_center_local: Vector2,
+	box_size: Vector2,
+	count: int,
+	box_rotation_deg: float = 0.0,
+	min_spacing_m: float = 0.0,
+	wall_recess_tiles: int = SPAWN_BOX_WALL_RECESS_TILES
+) -> Array[Vector3]:
+	var result: Array[Vector3] = []
+	if count <= 0:
+		return result
+	if _spawn_candidates.is_empty():
+		_build_spawn_points()
+	_collect_spawn_blockers()
+	box_center_local = snap_box_center_to_tile(box_center_local, wall_recess_tiles)
+	var size := Vector2(
+		maxf(SPAWN_BOX_MIN_SIZE_M, box_size.x), maxf(SPAWN_BOX_MIN_SIZE_M, box_size.y)
+	)
+	var half := size * 0.5
+	var radians := deg_to_rad(box_rotation_deg)
+	var cos_r := cos(radians)
+	var sin_r := sin(radians)
+	var clearance := _spawn_clearance()
+	var spacing := maxf(ENEMY_BODY_RADIUS_M * 2.0 + 0.1, min_spacing_m)
+	var seed_value := _box_pick_seed(box_center_local, half)
+	var resolved := _resolve_box_pool(
+		box_center_local, half, cos_r, sin_r, clearance, spacing, seed_value, count
+	)
+	var pool: Array[Vector3] = resolved["pool"]
+	box_center_local = Vector2(resolved["center"])
+	var chosen := _scatter_box_pick(pool, spacing, count, seed_value)
+	for point in chosen:
+		result.append(to_global(point))
+	while result.size() < count:
+		result.append(Vector3.INF)
+	return result
+
+
+## 盒内取点：**带种子随机** + 最小间距硬下限（业主 2026-09-26 口径「盒内随机位置刷怪」）。
+##
+## 单轮 = 「Fisher-Yates 随机序 + 首适配」：按种子派生的随机序逐个试放，与已选点都 ≥ `spacing`
+## 才收；排不下 `count` 只就**少出**（绝不把两只怪塞到同一处）。
+##
+## ⚠ 为什么要**有界重洗**（`SPAWN_BOX_PICK_ATTEMPTS` 轮）：首适配对**随机序敏感** —— 若第一只
+## 先抽到**居中**的点，会把整个小盒的余量一次吃光（3×3 盒、间距 1.7 m 时中心到池内任一点
+## ≤1.414 m < 1.7 ⇒ 第二只无处可放），于是「本来排得下」被误判成「排不下」、触发落地平移，且
+## **随种子翻面**（实测 `room_05#1` / `room_10#3`：同一盒位三种子三样）。改为「首轮取不满则换种
+## 再试，取首个取满者」，容量判定与出怪选点同时变稳。**第 0 轮 = 原先的单次随机序** ⇒ 已能排下
+## 的盒位置逐字不变，只对排不下的盒重洗。
+##
+## 为什么不是「贪心取离已选点最远者 + 贴边加权」（更早实现）：贴边加权给所有贴边点**同分**，
+## 贪心退化成「按顺序取同一条边上的下一个点」⇒ 怪在盒里排成一条线（设计 §7.1：8 个盒次异常，
+## 全部 `prefer_edge=true`）。本实现不引入任何边缘加权，位置仍是随机的。
+##
+## ⚠ 容量判定（`_fits_in_box`）与出怪选点必须**共用本函数 + 同一 `seed_value`**，
+## 否则「判定够、实际排不下」会像旧实现那样漏掉落地平移。
+func _scatter_box_pick(
+	pool_in: Array[Vector3], spacing: float, count: int, seed_value: int
+) -> Array[Vector3]:
+	if count <= 0 or pool_in.is_empty():
+		return []
+	# `assign()` 让元素仍带 Vector3 类型（`duplicate()` 返回无类型 Array）。
+	var pool: Array[Vector3] = []
+	pool.assign(pool_in)
+	var best: Array[Vector3] = []
+	# 逐轮换种重洗，取**首个取满**者；都不满则留取点最多的一轮（宁少出不穿模）。
+	for attempt in range(SPAWN_BOX_PICK_ATTEMPTS):
+		var candidate := _box_first_fit_pass(
+			pool, spacing, count, seed_value + attempt * SPAWN_BOX_PICK_ATTEMPT_STRIDE
+		)
+		if candidate.size() > best.size():
+			best = candidate
+		if best.size() >= count:
+			break
+	return best
+
+
+## 单轮「Fisher-Yates 随机序 + 首适配」。抽离出来只为让 `_scatter_box_pick` 能换种重洗。
+func _box_first_fit_pass(
+	pool: Array[Vector3], spacing: float, count: int, seed_value: int
+) -> Array[Vector3]:
+	var chosen: Array[Vector3] = []
+	var shuffled: Array[Vector3] = []
+	shuffled.assign(pool)
+	var rng := RandomNumberGenerator.new()
+	rng.seed = seed_value
+	for i in range(shuffled.size() - 1, 0, -1):
+		var j := rng.randi_range(0, i)
+		var swap := shuffled[i]
+		shuffled[i] = shuffled[j]
+		shuffled[j] = swap
+	for point in shuffled:
+		if chosen.size() >= count:
+			break
+		var ok := true
+		for previous in chosen:
+			if point.distance_to(previous) < spacing - 0.001:
+				ok = false
+				break
+		if ok:
+			chosen.append(point)
+	return chosen
+
+
+## 盒内随机取点的**确定性种子**：由「房种子 + 房 id + 盒心 / 尺寸」派生。
+## 目的：同局同盒每次复算都是同一批落点（探针与真机一致、可回归）；不同房 / 不同盒各自不同。
+## 刻意**不把需求量算进种子**：同一 (盒心, 尺寸) 的取点轮次序列与需求量无关；容量判定
+## （`_fits_in_box`）与出怪选点对**同一需求量**调用同一函数 + 同一批轮次种子，答案必然一致。
+func _box_pick_seed(box_center_local: Vector2, half: Vector2) -> int:
+	return (
+		room_seed
+		^ room_id.hash()
+		^ 0x424f5831
+		^ int(round(box_center_local.x * 100.0))
+		^ (int(round(box_center_local.y * 100.0)) * 131)
+		^ (int(round(half.x * 100.0)) * 6367)
+		^ (int(round(half.y * 100.0)) * 25847)
+	)
+
+
+## 盒内候选：**盒自身**按 `SPAWN_BOX_SAMPLE_STEP_M` 网格采样（在盒局部系内步进、再转回房间局部系），
+## 逐个过「地砖覆盖 + 离墙净距」与「实体障碍」两道闸。
+##
+## 为什么不复用房间级 `_spawn_candidates`：那是**每 5 m 砖 3×3 子点**的粗网格，密度由地砖粒度决定。
+## 盒子可以比一块砖还窄（6×14 的窄长盒），粗网格在盒里只剩三五个点，贪心只能把怪挤在一起
+## （实测两只相距 0.66 m ⇒ 直接穿模）。盒是**独立采样域**，密度该由盒自己定。
+func _box_sample_points(
+	box_center_local: Vector2, half: Vector2, cos_r: float, sin_r: float, clearance: float
+) -> Array[Vector3]:
+	var pool: Array[Vector3] = []
+	var step := SPAWN_BOX_SAMPLE_STEP_M
+	var columns := int(floor(half.x / step))
+	var rows := int(floor(half.y / step))
+	for ix in range(-columns, columns + 1):
+		for iz in range(-rows, rows + 1):
+			var local := Vector2(ix * step, iz * step)
+			if absf(local.x) > half.x or absf(local.y) > half.y:
+				continue
+			# 盒局部系 → 房间局部系（与 `_box_local_point` 互逆）。
+			var rel := Vector2(local.x * cos_r - local.y * sin_r, local.x * sin_r + local.y * cos_r)
+			var point := Vector3(box_center_local.x + rel.x, 0.0, box_center_local.y + rel.y)
+			if not _spawn_floor_contains(point, clearance):
+				continue
+			if not _spawn_obstacle_free(point):
+				continue
+			pool.append(point)
+	return pool
+
+
+## 解析「落地盒」：返回 `{center, pool}`。
+##
+## `constrained` 远征每局按种子重洗房型，摆放坐标只能写在**房局部系**里，数据作者无法预知
+## 本局 `room_0X` 会被洗成哪种房型。于是会出现两类失配：
+##   ① 盒心压在 U 形空腔 / 下沉坑 / 非矩形凹口上 ⇒ 盒内**一个候选都没有**，房间直接锁死；
+##   ② 盒只有一小半落在可通行区里 ⇒ **容量不足**（`box_corner_ambush` 要 6 只只排得 4 只），
+##      调用方会补 `Vector3.INF`，整波被判「无合法落点」。
+##
+## ⚠️ **本房型池下不存在「任何房型都成立」的固定坐标**（已逐块求交证明）：
+##   `corridor_45x40` 的 l_turn / u_turn 可通行区在 z∈(-5,5) 段是空集，
+##   而 `bridge_60x50` 只允许 x,z∈[-5,5] —— 房型池可通行区交集 = ∅。
+##   故 `center_m` 只能是**意图锚点**，运行时必须按本局房型落到可通行处。
+##
+## 落地口径：**容量达标就原样尊重声明位置**（多数情况，零额外开销）；不足则在
+## `SPAWN_BOX_SHIFT_RADIUS_M` 内、按「离声明位置由近及远」找**容量达标**的落点，取最近的一个
+## （最小漂移）；都不达标才退到容量最大者。落地后的盒即本局硬范围，出怪只可能落在其中。
+##
+## ⚠ 容量必须用 `_greedy_box_pick`（选点的**同一条**规则）来判 —— 只看池点数会误判成「够」。
+func _resolve_box_pool(
+	box_center_local: Vector2,
+	half: Vector2,
+	cos_r: float,
+	sin_r: float,
+	clearance: float,
+	spacing: float,
+	seed_value: int,
+	required: int
+) -> Dictionary:
+	var pool := _box_sample_points(box_center_local, half, cos_r, sin_r, clearance)
+	if _fits_in_box(pool, spacing, required, seed_value):
+		return {"center": box_center_local, "pool": pool}
+	var nearby: Array = []
+	for candidate in _spawn_candidates:
+		var offset := Vector2(candidate.x - box_center_local.x, candidate.z - box_center_local.y)
+		var distance := offset.length()
+		if distance <= SPAWN_BOX_SHIFT_RADIUS_M:
+			nearby.append({"point": candidate, "distance": distance})
+	nearby.sort_custom(func(a, b): return float(a["distance"]) < float(b["distance"]))
+	var fallback_center := box_center_local
+	var fallback_pool := pool
+	var tried := 0
+	for entry in nearby:
+		if tried >= SPAWN_BOX_SHIFT_TRIES:
+			break
+		tried += 1
+		var point := entry["point"] as Vector3
+		var anchor := Vector2(point.x, point.z)
+		var trial := _box_sample_points(anchor, half, cos_r, sin_r, clearance)
+		if _fits_in_box(trial, spacing, required, seed_value):
+			# 已按距离升序，第一条达标者即「最小漂移」解。
+			return {"center": anchor, "pool": trial}
+		if trial.size() > fallback_pool.size():
+			fallback_pool = trial
+			fallback_center = anchor
+	return {"center": fallback_center, "pool": fallback_pool}
+
+
+## 该盒位能否按 `spacing` 硬下限真的排出 `required` 个落点（取够即停，不必数满）。
+## 与出怪选点**共用 `_scatter_box_pick` 与同一 `seed_value`**，保证「判定」与「落地」一致。
+func _fits_in_box(
+	pool: Array[Vector3], spacing: float, required: int, seed_value: int
+) -> bool:
+	if required <= 0:
+		return true
+	return _scatter_box_pick(pool, spacing, required, seed_value).size() >= required
+
+
+## 公开查询：本局该盒的**落地盒心**（房局部坐标 (x, z)）。探针/校验器用它复核「声明位置
+## 是否被平移、平移了多少」；运行时由 `spawn_points_in_box` 内部复用同一口径。
+## `prefer_edge` / `min_spacing_m` 必须与出怪时一致，否则「够不够」的判定会与选点打架。
+func resolve_spawn_box_center_local(
+	box_center_local: Vector2,
+	box_size: Vector2,
+	required: int,
+	box_rotation_deg: float = 0.0,
+	min_spacing_m: float = 0.0,
+	wall_recess_tiles: int = SPAWN_BOX_WALL_RECESS_TILES
+) -> Vector2:
+	if _spawn_candidates.is_empty():
+		_build_spawn_points()
+	_collect_spawn_blockers()
+	box_center_local = snap_box_center_to_tile(box_center_local, wall_recess_tiles)
+	var size := Vector2(
+		maxf(SPAWN_BOX_MIN_SIZE_M, box_size.x), maxf(SPAWN_BOX_MIN_SIZE_M, box_size.y)
+	)
+	var half := size * 0.5
+	var radians := deg_to_rad(box_rotation_deg)
+	var spacing := maxf(ENEMY_BODY_RADIUS_M * 2.0 + 0.1, min_spacing_m)
+	var seed_value := _box_pick_seed(box_center_local, half)
+	var resolved := _resolve_box_pool(
+		box_center_local, half, cos(radians), sin(radians), _spawn_clearance(), spacing,
+		seed_value, required
+	)
+	return Vector2(resolved["center"])
+
+
+## 把声明的盒心**吸附到地砖格心**，并强制离房墙内缩 `recess_tiles` 圈（1 圈 = 5 m）。
+##
+## 为什么必须吸附：业主口径「刷怪盒以砖块（5×5 地砖）的中心为中心」—— 吸附后
+## 「这个房间的 01 号刷怪盒在哪」可以用「哪一块地砖」唯一描述，也才谈得上逐盒微调。
+##
+## 为什么在运行时吸附而非写死绝对坐标：远征 `constrained` 每局重洗房型，凹口 / 空腔会剔掉
+## 一部分砖（`_authored_tile_cells` = 本局**真实存在**的砖心）。声明坐标只能在运行时落到
+## 本局确实存在、且离墙够远的砖上。找不到满足内缩的砖时退到「最近的砖」，绝不返回房外点。
+func snap_box_center_to_tile(declared: Vector2, recess_tiles: int) -> Vector2:
+	if _authored_tile_cells.is_empty():
+		return declared
+	var want := maxi(0, recess_tiles)
+	# 内缩 want 圈 ⇔ 要求该砖心到地砖并集边界的 L∞ 距离 ≥ 5*want。
+	# `_spawn_floor_contains(point, r)` 判的是「以 point 为心、边长 2r 的正方形是否全被地砖覆盖」：
+	# 取 r = 5*want 时，ring<want 的砖必然溢出房外（不达标），ring≥want 的砖达标。
+	var clearance := SPAWN_BOX_TILE_M * float(want) + 0.01
+	var best := declared
+	var best_distance := INF
+	var nearest := declared
+	var nearest_distance := INF
+	for cell in _authored_tile_cells:
+		var candidate := Vector2(cell.x, cell.z)
+		var distance := candidate.distance_to(declared)
+		if distance < nearest_distance:
+			nearest_distance = distance
+			nearest = candidate
+		if want > 0 and not _spawn_floor_contains(Vector3(candidate.x, 0.0, candidate.y), clearance):
+			continue
+		if distance < best_distance:
+			best_distance = distance
+			best = candidate
+	return best if best_distance < INF else nearest
+
+
+func _box_local_point(
+	point: Vector3, box_center_local: Vector2, cos_r: float, sin_r: float
+) -> Vector2:
+	var rel := Vector2(point.x - box_center_local.x, point.z - box_center_local.y)
+	return Vector2(rel.x * cos_r + rel.y * sin_r, -rel.x * sin_r + rel.y * cos_r)
+
+
+func _on_room_body_entered(body: Node3D) -> void:
+	if not body.is_in_group("player_3d"):
+		return
+	call_deferred("_emit_player_entered_if_present", body)
+
+
+func _emit_player_entered_if_present(body: Node3D) -> void:
+	if body == null or not is_instance_valid(body) or not body.is_in_group("player_3d"):
+		return
+	var inside := (
+		contains_world_position(body.global_position, -1.0, TOWER_GEOMETRY.FLOOR_HEIGHT_M + 0.8)
+		if room_type == "FACILITY"
+		else contains_world_position(body.global_position)
+	)
+	if not inside:
+		return
+	if not visited:
+		visited = true
+	player_entered.emit(self)
+
+
+func _on_prop_searched(_prop: RoomFurniture3D, loot: Dictionary) -> void:
+	var event := loot.duplicate(true)
+	event["sound_position"] = _prop.global_position
+	prop_searched.emit(self, event)
+
+
+func _on_service_activated(station: ServiceStation3D) -> void:
+	service_activated.emit(self, station)
+
+
+# —— prefab 通用入口：实例化 + 设位置/缩放/材质
+# 预制体内部 mesh/collision 已经是 1×1×1 或真实参考尺寸，scale 整体传递到子节点。
+func _spawn_prefab(node_name: String, prefab: PackedScene, position: Vector3, scale_vec: Vector3, material: StandardMaterial3D) -> Node3D:
+	if prefab == null:
+		push_error("DungeonRoom3D: missing prefab for %s" % node_name)
+		return null
+	var instance := prefab.instantiate() as Node3D
+	if instance == null:
+		return null
+	instance.name = node_name
+	instance.position = position
+	instance.scale = scale_vec
+	_apply_material_override(instance, material)
+	_add_runtime_detail_child(instance)
+	return instance
+
+
+func _apply_material_override(root: Node, material: StandardMaterial3D) -> void:
+	if material == null:
+		return
+	for child in root.get_children():
+		if child is MeshInstance3D:
+			(child as MeshInstance3D).material_override = material
+		_apply_material_override(child, material)
+
+
+func _material(color: Color, metallic: float, roughness: float) -> StandardMaterial3D:
+	var material := StandardMaterial3D.new()
+	material.albedo_color = color
+	material.metallic = metallic
+	material.roughness = roughness
+	return material
+
+
+func _set_collision_enabled(root: Node, enabled: bool, preserve_support := false) -> void:
+	if root is CollisionShape3D:
+		var collision := root as CollisionShape3D
+		var is_support := collision.get_parent() != null and collision.get_parent().name == "FloorBody"
+		collision.set_deferred("disabled", false if preserve_support and is_support else not enabled)
+	for child in root.get_children():
+		_set_collision_enabled(child, enabled, preserve_support)
+
+
+func _keep_structural_physics_active(root: Node) -> void:
+	# RuntimeDetail 由流送状态独立管理；这里只固定房间壳体的墙、门框、门和
+	# 楼板碰撞。PROCESS_MODE_ALWAYS 使它们在房间父节点停用脚本时仍参与物理
+	# 查询，保证渲染阴影、角色通行和怪物受光使用同一套几何。
+	if root == _detail_root or root.name == "RuntimeDetail":
+		return
+	if root is PhysicsBody3D:
+		(root as PhysicsBody3D).process_mode = Node.PROCESS_MODE_ALWAYS
+	for child in root.get_children():
+		_keep_structural_physics_active(child)
+
+
+func _has_enabled_support_collision() -> bool:
+	# FloorBody 可能嵌套在 prefab 根节点下，递归查找。
+	return _find_floor_body_enabled(self)
+
+
+func _find_floor_body_enabled(root: Node) -> bool:
+	if root is StaticBody3D and root.name == "FloorBody":
+		for child in root.get_children():
+			if child is CollisionShape3D and not (child as CollisionShape3D).disabled:
+				return true
+	for child in root.get_children():
+		if _find_floor_body_enabled(child):
+			return true
+	return false
+
+
+func _get_door_snapshots() -> Array[Dictionary]:
+	var result: Array[Dictionary] = []
+	for direction_value in _door_nodes:
+		var direction := str(direction_value)
+		var door := _door_nodes[direction] as RoomDoor3D
+		if door != null:
+			var snapshot := door.get_snapshot()
+			# 共享门实体只保存一套状态机，但每个房间快照仍需报告自己的出口方向和目标。
+			snapshot["direction"] = direction
+			snapshot["target_room_id"] = str(door_targets.get(direction, ""))
+			snapshot["shared_door_owner_room_id"] = str(
+				door.get_meta("shared_door_owner_room_id", room_id)
+			)
+			result.append(snapshot)
+	return result

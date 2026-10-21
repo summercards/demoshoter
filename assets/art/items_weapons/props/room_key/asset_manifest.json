@@ -1,0 +1,92 @@
+{
+  "asset_id": "ITM-KEY-ITEM-ROOM-KEY",
+  "logical_id": "item_room_key",
+  "name": "房间钥匙",
+  "slug": "room_key",
+  "domain": "props",
+  "kind": "key",
+  "content_ids": [
+    "item_room_key"
+  ],
+  "godot_dimensions_m": [
+    0.6731603145599365,
+    1.0649999380111694,
+    0.20596696436405182
+  ],
+  "measurement": {
+    "xyz_min_m": [
+      -0.300000011920929,
+      -0.405000001192093,
+      -0.0599999986588955
+    ],
+    "xyz_size_m": [
+      0.639999985694885,
+      1.06499993801117,
+      0.119999997317791
+    ]
+  },
+  "principal_length_m": 1.06499993801117,
+  "origin": "bottom_center",
+  "animation_tier": "tier_0_static",
+  "materials": [
+    "01_精工金属_道具骨架",
+    "02_细腻哑光_道具大面",
+    "03_清漆反光_道具点缀",
+    "04_柔和自发光_道具UI"
+  ],
+  "budget_triangles": [
+    100,
+    200
+  ],
+  "status": "已优化并正式接入",
+  "geometry_design": "饱满可辨轮廓；源组件采样减面；无碰撞；公共色盘",
+  "model_variants": {
+    "preview": {
+      "source_blend": "art_source/items_weapons/props/room_key/source/itm_room_key_source_v001.blend",
+      "sha256": "14f949a0850562578a7fd3a5ca86df5888e785becbcd4e2621672f290ae11820",
+      "triangles": 1136,
+      "glb": "assets/art/items_weapons/props/room_key/components/itm_room_key_preview_visual_top3d.glb",
+      "prefab": "assets/art/items_weapons/props/room_key/runtime/itm_room_key_preview_root_top3d.tscn",
+      "glb_sha256": "f9a2116d5eb1c0745692a882725e18e9351d0a3684efb1dcd963e37898f9204b",
+      "prefab_sha256": "a86f208537236dd1d44aa34abd75fa95b3395be9f0606361c19b357610c0237a"
+    },
+    "ground": {
+      "source_blend": "art_source/items_weapons/props/room_key/source/itm_room_key_ground_source_v001.blend",
+      "sha256": "1bbb5fd5442506580426430d0cd3b3d4896dc395698569fe6c663009badb1953",
+      "triangles": 120,
+      "glb": "assets/art/items_weapons/props/room_key/components/itm_room_key_ground_visual_top3d.glb",
+      "prefab": "assets/art/items_weapons/props/room_key/runtime/itm_room_key_ground_root_top3d.tscn",
+      "glb_sha256": "b8e7ae2724f1f415711603488d841db931ce0b1ed0799dffa3fd8a32aeab5701",
+      "prefab_sha256": "c0d7d83015c25810d686dc520ce710ba39cff415c67bde61413660f9e8a15452"
+    }
+  },
+  "validation": {
+    "runtime_gallery": true,
+    "content_mapping": true,
+    "ground_budget": true,
+    "notes": "see development/2026-10-14_remaining_item_models.md"
+  },
+  "palette_contract": {
+    "path": "assets/art/shared/palette/item_high_visibility_palette_10x10_512.png",
+    "sha256": "8da13f6d4da6701b983aa88cfd0e839a8178ab5c51a8f169fc8a4638308cb1c7",
+    "recipe": "art_source/shared/palette/item_palette_recipe_v001.json",
+    "import_script": "tools/asset_pipeline/item_shared_palette_post_import.gd",
+    "saturation_multiplier": 1.6099999999999999,
+    "value_multiplier": 1.6099999999999999,
+    "material_roles": [
+      "01_精工金属_道具骨架",
+      "02_细腻哑光_道具大面",
+      "03_清漆反光_道具点缀",
+      "04_柔和自发光_道具UI"
+    ],
+    "material_paths": [
+      "assets/art/items_weapons/shared/materials/itm_metal.tres",
+      "assets/art/items_weapons/shared/materials/itm_matte.tres",
+      "assets/art/items_weapons/shared/materials/itm_clearcoat.tres",
+      "assets/art/items_weapons/shared/materials/itm_emissive.tres"
+    ],
+    "icon_shadow_fill_energy": 0.45,
+    "geometry_uv_unchanged": true,
+    "validated_on": "2026-10-15"
+  }
+}

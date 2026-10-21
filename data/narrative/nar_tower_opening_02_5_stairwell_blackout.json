@@ -1,0 +1,28 @@
+{
+  "narrative_id": "nar_tower_opening_02_5_stairwell_blackout",
+  "schema_version": 1,
+  "priority": 0,
+  "trigger": {
+    "kind": "point",
+    "point_room": "facility",
+    "point_offset": [
+      17.0,
+      0.0,
+      -2.5
+    ],
+    "radius": 2.5,
+    "once": "run"
+  },
+  "duration": 0.3,
+  "cues": [
+    {
+      "at": 0.0,
+      "do": "scene.opening_02_5_blackout",
+      "room_id": "facility"
+    },
+    {
+      "at": 0.3,
+      "do": "flow.end"
+    }
+  ]
+}

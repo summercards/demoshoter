@@ -1,0 +1,240 @@
+class_name RuntimeRewardCoordinator
+extends RefCounted
+## 运行时奖励调度边界：场景只提供触发事实，本类负责覆盖链与确定性 seed。
+## 不持有场景节点，不生成表现，不写背包/钱包。
+
+const SERVICE := preload("res://src/rewards/RewardService.gd")
+const MONSTER_DROP_TABLE := preload("res://src/rewards/MonsterDropTable.gd")
+
+var _run_seed := 1
+var _level_id := ""
+var _monster_drop_specs: Dictionary = {}
+var _monster_drop_errors: Array[Dictionary] = []
+## 关卡级「空掉落」概率（`monster_drop_table.empty_chance`）。
+## 为什么单独存一份：本表只登记了部分怪（远征01 是 3/6 种），其余怪走
+## `MonsterInjector.drop_spec_for` 的旧公式兜底 —— 那条路够不着表级字段。
+## 存本变量、随 kill 请求下发，才能让**同关所有普通怪**吃到同一概率。
+var _monster_drop_empty_chance := 0.0
+## 关卡级货币分档（`monster_rules.currency`，2026-10-14）。
+## 空字典 = 本关未配置 ⇒ 货币仍走物品规格自带的那条，且不摘货币条目
+## ⇒ 塔楼与其余未配置关卡行为逐字不变。
+var _level_currency_rules: Dictionary = {}
+
+
+func configure(run_seed: int) -> void:
+	_run_seed = run_seed
+
+
+## 装载当前关卡的怪物掉落表。整表编译失败时清空，绝不让半张表继续生效。
+func configure_level_drop_table(level_id: String, table: Dictionary) -> Dictionary:
+	_level_id = level_id
+	_monster_drop_specs.clear()
+	_monster_drop_errors.clear()
+	_monster_drop_empty_chance = clampf(float(table.get("empty_chance", 0.0)), 0.0, 1.0)
+	if table.is_empty():
+		return {"ok": true, "level_id": level_id, "row_count": 0, "monster_count": 0, "errors": []}
+	var compiled := MONSTER_DROP_TABLE.compile(level_id, table)
+	if bool(compiled.get("ok", false)):
+		_monster_drop_specs = (compiled.get("specs", {}) as Dictionary).duplicate(true)
+	else:
+		_monster_drop_errors = (compiled.get("errors", []) as Array).duplicate(true)
+	return compiled
+
+
+func level_drop_table_snapshot() -> Dictionary:
+	return {
+		"level_id": _level_id,
+		"monster_ids": _monster_drop_specs.keys(),
+		"errors": _monster_drop_errors.duplicate(true),
+	}
+
+
+## 装载关卡级货币分档（`monster_rules.currency`）。与掉落表同寿命，切关/重建时整段替换。
+## 空字典 = 未配置 ⇒ 货币回到「由物品规格自带那条供给」的旧路径。
+func configure_level_currency(rules: Dictionary) -> void:
+	_level_currency_rules = rules.duplicate(true) if rules != null else {}
+
+
+func level_currency_snapshot() -> Dictionary:
+	return {
+		"level_id": _level_id,
+		"configured": not _level_currency_rules.is_empty(),
+		"kinds": (_level_currency_rules.get("per_kind", {}) as Dictionary).keys(),
+		"tiers": (_level_currency_rules.get("per_tier", {}) as Dictionary).keys(),
+		"has_default": _level_currency_rules.has("default"),
+	}
+
+
+
+func resolve_search(
+	room_reward_plan: Dictionary,
+	pool_id: String,
+	floor: int,
+	event_id: String
+) -> Dictionary:
+	return _resolve_dispatch({
+		"trigger": "search",
+		"room_reward_plan": room_reward_plan,
+		"default_pool_id": pool_id,
+		"context": _context(event_id, floor),
+	})
+
+
+func resolve_clear(room_reward_plan: Dictionary, floor: int, event_id: String) -> Dictionary:
+	return _resolve_dispatch({
+		"trigger": "clear",
+		"room_reward_plan": room_reward_plan,
+		"context": _context(event_id, floor),
+	})
+
+
+func resolve_kill(
+	room_reward_plan: Dictionary,
+	enemy_data: Dictionary,
+	event_id: String
+) -> Dictionary:
+	var floor := maxi(1, int(enemy_data.get("floor", 1)))
+	var tier := (
+		"boss" if bool(enemy_data.get("is_boss", false))
+		else "elite" if bool(enemy_data.get("is_elite", false))
+		else "normal"
+	)
+	var monster_id := str(enemy_data.get("enemy_type", "melee_chaser"))
+	var report := _resolve_dispatch({
+		"trigger": "kill",
+		"room_reward_plan": room_reward_plan,
+		"monster_id": monster_id,
+		"monster_tier": tier,
+		"monster_drop_specs": _monster_drop_specs,
+		"monster_drop_empty_chance": _monster_drop_empty_chance,
+		# 配了关卡级货币分档 ⇒ 把货币从物品规格里摘掉，改由下方独立通道发放。
+		"strip_currency": not _level_currency_rules.is_empty(),
+		"floor_level": _floor_level_from_loot_table(str(enemy_data.get("loot_table", ""))),
+		"context": _context(event_id, floor),
+	})
+	# 货币独立通道（业主 2026-10-14）：**所有被击败的怪 100% 必掉**，
+	# 且「货币不算在物品掉落里头」⇒ 不受 `empty_chance` 影响，也不占物品件数。
+	# 物品侧解析失败（如未登记池）也不连累货币 —— 两者在 grants 层合并、在 errors 层各自上报。
+	_append_level_currency(report, monster_id, tier, floor, event_id)
+	var bounty := maxi(0, int(enemy_data.get("elite_bounty_currency", 0)))
+	if bounty > 0:
+		var bounty_report := SERVICE.resolve({
+			"spec_id": "elite_bounty:%s" % event_id,
+			"entries": [{
+				"kind": "currency",
+				"currency_id": "extraction_points",
+				"amount": bounty,
+			}],
+		}, _context("%s:bounty" % event_id, floor))
+		(report["grants"] as Array).append_array(bounty_report.get("grants", []))
+		(report["errors"] as Array).append_array(bounty_report.get("errors", []))
+		report["ok"] = bool(report.get("ok", false)) and bool(bounty_report.get("ok", false))
+	# 关卡表的「独立判定」允许同次击杀命中多件实物；若仍压成 1 件，作者表语义就是假的。
+	# Boss / 强化怪保留多件（2026-10-18）：
+	#   · Boss = 1-2 把枪 + 其它 + 1 包弹药，压成 1 件会把枪直接吞掉；
+	#   · 强化怪 = 普通掉落 + 25% 的一把枪，压成 1 件且优先保留弹药 ⇒ 枪永远见不到。
+	# 精英保持**既有契约**：一个实物 + 一个金币球，且那 1 件优先备弹
+	# （`verify_reward_service_flow` 与 `verify_finite_ammo_flow` 双向钉死）。
+	# ⚠ 已知遗留（本次不修，属独立裁决）：精英的 `elite_floor_*` 池里那些权重
+	#   —— 含 50~67% 的枪 —— **从来不会落地**，因为那 1 件永远被备弹占用。
+	#   2026-10-18 曾试图用 `prefer_pool` 让精英改抽池，结果与「枪只从 Boss /
+	#   强化怪出」的业主口径冲突，且打红 `verify_finite_ammo_flow`，已回退。
+	#   要不要让精英以「备弹 + 池物品」两件掉落，需要单独立项裁决。
+	var uses_level_table := tier == "normal" and _monster_drop_specs.has(monster_id)
+	var is_strong_variant := MonsterVariants.is_variant(monster_id)
+	var preserve_physical := uses_level_table or tier == "boss" or is_strong_variant
+	_collapse_kill_ground_grants(report, preserve_physical)
+	return report
+
+
+## 追加关卡级货币产出。**独立于物品掉落**：不受 `empty_chance` 影响、不占物品件数。
+## 未配置 `monster_rules.currency` 的关卡（塔楼等）在这里是**一行 no-op** ——
+## 货币仍由物品规格自带的那条供给，行为逐字不变。
+func _append_level_currency(
+	report: Dictionary, monster_id: String, tier: String, floor: int, event_id: String
+) -> void:
+	var spec := SERVICE.currency_spec_for(monster_id, tier, floor, _level_currency_rules)
+	if spec.is_empty():
+		return
+	var currency_report := SERVICE.resolve(spec, _context("%s:currency" % event_id, floor))
+	var grants := currency_report.get("grants", []) as Array
+	if grants.is_empty():
+		(report["errors"] as Array).append_array(currency_report.get("errors", []))
+		return
+	(report["grants"] as Array).append_array(grants)
+	report["ok"] = bool(report.get("ok", false)) and bool(currency_report.get("ok", false))
+
+
+## 把一次击杀的地面实物压到「1 件 + 1 个金币球」（`preserve_physical` 时全部保留）。
+## 压缩时**优先保留备弹** —— 这是 2026-09 起的既有手感，`verify_finite_ammo_flow`
+## 与 `verify_reward_service_flow` 双向钉死，不要为了「让池物品露脸」改这条优先级：
+## 2026-10-18 试过一次（精英改抽池），直接打红备弹门禁，已回退。
+func _collapse_kill_ground_grants(report: Dictionary, preserve_physical := false) -> void:
+	var grants := report.get("grants", []) as Array
+	var currency_grants: Array = []
+	var physical_grants: Array = []
+	for value in grants:
+		var grant := value as Dictionary
+		if str(grant.get("kind", "")) == "currency":
+			currency_grants.append(grant)
+		else:
+			physical_grants.append(grant)
+	var collapsed: Array = []
+	if preserve_physical:
+		collapsed.append_array(physical_grants)
+	elif not physical_grants.is_empty():
+		var chosen := physical_grants[0] as Dictionary
+		for value in physical_grants:
+			var candidate := value as Dictionary
+			if str(candidate.get("item_id", "")) == "item_ammo_pack":
+				chosen = candidate
+				break
+		collapsed.append(chosen)
+	if not currency_grants.is_empty():
+		var merged_currency := (currency_grants[0] as Dictionary).duplicate(true)
+		var total_currency := 0
+		for value in currency_grants:
+			total_currency += maxi(0, int((value as Dictionary).get("amount", 0)))
+		merged_currency["amount"] = total_currency
+		collapsed.append(merged_currency)
+	report["grants"] = collapsed
+
+
+func resolve_fixed_item(item_id: String, count: int, event_id: String, floor := 1) -> Dictionary:
+	var resolution := SERVICE.resolve({
+		"spec_id": "fixed:%s" % event_id,
+		"entries": [{"kind": "item", "item_id": item_id, "count": count}],
+	}, _context(event_id, floor))
+	return _report(resolution)
+
+
+func _resolve_dispatch(request: Dictionary) -> Dictionary:
+	return _report(SERVICE.resolve_dispatch(request))
+
+
+func _report(resolution: Dictionary) -> Dictionary:
+	return {
+		"ok": bool(resolution.get("ok", false)),
+		"spec_id": str(resolution.get("spec_id", "")),
+		"grants": (resolution.get("grants", []) as Array).duplicate(true),
+		"rejected": (resolution.get("rejected", []) as Array).duplicate(true),
+		"errors": (resolution.get("errors", []) as Array).duplicate(true),
+		"truncated": bool(resolution.get("truncated", false)),
+		"used_fallback": bool(resolution.get("used_fallback", false)),
+	}
+
+
+func _context(event_id: String, floor: int) -> Dictionary:
+	return {
+		"seed": hash("%d|%s" % [_run_seed, event_id]),
+		"floor": maxi(1, floor),
+		"depth": maxi(0, floor - 1),
+	}
+
+
+func _floor_level_from_loot_table(pool_id: String) -> int:
+	match pool_id:
+		"loot_floor_3_4": return RoomData.FloorLevel.MEDIUM
+		"loot_floor_5": return RoomData.FloorLevel.DEEP
+		"loot_abyss": return RoomData.FloorLevel.ABYSS
+	return RoomData.FloorLevel.SHALLOW

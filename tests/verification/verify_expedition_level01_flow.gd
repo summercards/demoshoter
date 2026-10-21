@@ -1,0 +1,1454 @@
+extends Node
+## 远征关卡01（expedition）闭环验收。替代已废弃的 verify_rogue_map_segment_flow。
+##
+## 断言的是「从远征情报室点 E → 读取界面 → 远征关卡01 → 满足基础玩法」这条主线：
+##   1) 基地目录动作：mission_operations 仍打开 RogueMapSelectMenu；
+##   2) 菜单冒烟：标题/说明/五行版图/传送与关闭按钮可用，目标链路常量正确；
+##   3) 读取界面 ExpeditionLoadingScreen：真实构建面包屑 + 标题 + 进度 + 步骤，
+##      并把关卡路径指向远征关卡场景（本场景不入树，避免 headless 直接切场景）；
+##   4) 远征关卡场景：单层、独立区块 Blocks/Expedition、无天台/基地/楼梯/电梯，
+##      且场景本身**不继承塔楼关卡场景**（只搭公共关卡基座 Dungeon3D.tscn）；
+##   5) 版图（数据驱动 13 房）：入口安全屋 15×15（v007 双门美术）+ 主路 room_01…room_10
+##      + Boss 房 + 撤离房（13 房一线到底，支线已取消）；内容房尺寸按种子从 8 个房型模板里抽，每局变；
+##   6) 内容池按种子洗牌（10 间内容房吃 10 项内容池，必含战斗房与可搜索房）；
+##   7) 玩法接线：刷怪、搜索容器、过门命运卡三选一、终点 STANDARD 撤离信标；
+##   8) 门策略：入口门免费通行；01 之后的门恢复清房/钥匙/命运卡；
+##   9) 退出战局：清空随身物品并按独立副本结算返回正式基地；
+##  10) 默认塔楼（TowerDescent3D.tscn）行为不被远征改动污染。
+
+const SAFE_ROOM_SIZE := Vector2(15.0, 15.0)
+const EXPEDITION_ROOM_SIZE := Vector2(25.0, 25.0)
+const EXPEDITION_SCENE := "res://scenes/ExpeditionLevel01_3D.tscn"
+## 设计源 id（同时是 LevelPlanLoader 的目录名与「数据驱动开关」的载体）。
+## 与 EXPEDITION_SCENE 同样**有意写死**：作为独立旁证，不跟产品代码共用常量。
+const EXPEDITION_LEVEL_ID := "expedition_01"
+const LOADING_SCENE := "res://scenes/ExpeditionLoadingScreen.tscn"
+const MENU_SCENE := "res://scenes/RogueMapSelectMenu.tscn"
+const TOWER_SCENE := "res://scenes/TowerDescent3D.tscn"
+const SAFE_ROOM_ART_VERSION := "v007"
+## 家具碰撞盒必须覆盖「走行面以上这一段身位」才算真的挡住。用带宽而不是精确身高，
+## 是因为判据只要求「盒子的竖直区间与玩家身位区间有交」，避免绑死角色尺寸。
+const FACILITY_BLOCK_BAND_MAX_Y := 1.0
+
+# —— 内置回退路径（generate_expedition）：设计源缺失时的兜底，本关实际不走 ——
+# 版图收敛为 13 房之后，这条路径的旧 7 房期望值**必须原样保留**：它是「设计源读不到」
+# 时的降级行为基线，跟着一起改等于把兜底路径的契约也一并改掉、失去旁证价值。
+## 内置回退路径的主路房：5 间内容房（无 Boss 房、无支线 —— 这条路径的版图口径停在收敛前）。
+const BUILTIN_MAIN_ROOM_IDS: Array[String] = ["room_01", "room_02", "room_03", "room_04", "room_05"]
+## 内置回退路径全房序：start + 主路 5 间 + extraction（共 7 房）。
+## ⚠️ 必须写字面量：GDScript 的 `const` **不接受数组拼接表达式**
+## （`["start"] + BUILTIN_MAIN_ROOM_IDS + ["extraction"]` 会报
+## "Assigned value for constant ... isn't a constant expression"，整个脚本加载失败）。
+const BUILTIN_ROOM_IDS: Array[String] = [
+	"start", "room_01", "room_02", "room_03", "room_04", "room_05", "extraction",
+]
+const BUILTIN_ROOM_TYPE_POOL: Array[String] = ["COMBAT", "COMBAT", "SCAVENGE", "STORAGE", "EVENT"]
+
+# —— 数据驱动路径（generate_from_level_plan）：本关 runtime_enabled=true 实际走这条 ——
+# mode = constrained ⇒ 房间清单与主路拓扑固定（来自 L2 蓝图），但**每间房用哪个房型、
+# 摆在哪个方向**每局按运行种子现算 ⇒ 只能断言「集合 + 拓扑 + 池子多重集」，
+# 不能钉死某一间的尺寸（见设计页 §4.6）。
+const PLAN_MAIN_ROOM_IDS: Array[String] = [
+	"room_01", "room_02", "room_03", "room_04", "room_05", "room_06",
+	"room_07", "room_08", "room_09", "room_10",
+]
+## 13 房全集（入口 start + 主路 room_01…room_10 + Boss + 撤离；支线已取消）。
+## 比对时按**排序后的集合**比：constrained 生成器按拓扑顺序插入房间
+## （实测顺序 start, room_01, room_02, …），而生成失败回退到 L2 样例时是文件序
+## ⇒ 顺序不是契约，集合才是。
+const PLAN_ROOM_IDS: Array[String] = [
+	"start", "room_01", "room_02", "room_03", "room_04", "room_05", "room_06",
+	"room_07", "room_08", "room_09", "room_10", "boss", "extraction",
+]
+## 内容房 = 吃 content_type_pool 的 10 间（全部在主路 room_01…room_10）；
+## 入口 / Boss / 撤离房不参与。
+const PLAN_CONTENT_ROOM_IDS: Array[String] = [
+	"room_01", "room_02", "room_03", "room_04", "room_05", "room_06",
+	"room_07", "room_08", "room_09", "room_10",
+]
+## 内容池 10 项（5 战斗 + 3 搜刮 + 1 储藏 + 1 事件），与 10 间内容房一一对应。
+const PLAN_CONTENT_TYPE_POOL: Array[String] = [
+	"COMBAT", "COMBAT", "COMBAT", "COMBAT", "COMBAT",
+	"SCAVENGE", "SCAVENGE", "SCAVENGE", "STORAGE", "EVENT",
+]
+## 支线已于 2026-09-25 裁定取消：主路 13 房一线到底，不含任何 branch 房。
+## 撤离房挂在 Boss 之后（主路 01—10 → boss → extraction），**不是**挂在最后一间主路房上。
+const PLAN_EXTRACTION_PARENT := "boss"
+## 8 个房型模板的尺寸集合（含桥房转置姿态的占位 60×30）：constrained 下内容房的尺寸必在其中
+## （哪间取哪寸每局变）。注意 60×30 是 `bridge_60x50` 旋转 90° 后的占位，**不是**第二个模板 id
+## —— 转置只靠 `template_rotation_deg: 90` 表达（业主裁定 2026-09-25，见 05.2 §3.4）。
+## 缩尺口径（2026-09-25，按设计页 §3.1.1 / §3.4 实跑）：db_70x50 → 40×30、
+## office_60x70 → 30×40；通道桥房 → 30×60 工字型（坑沿 y 跨 ⇒ 本体 30×60、转置 60×30）。
+const PLAN_TEMPLATE_SIZES: Array[Vector2] = [
+	Vector2(15.0, 15.0),  # safe_15x15（入口）
+	Vector2(45.0, 40.0),  # corridor_45x40
+	Vector2(40.0, 30.0),  # db_70x50（缩尺后 40×30）
+	Vector2(30.0, 40.0),  # office_60x70（缩尺后 30×40）
+	Vector2(30.0, 60.0),  # bridge_60x50（通道桥房本体，工字型，坑沿 y 跨）
+	Vector2(60.0, 30.0),  # bridge_60x50 旋转 90°（同一模板的转置姿态，坑沿 x 跨）
+	Vector2(80.0, 100.0),  # boss_deep_shaft_80x100（Boss 房固定，深井 + 高位入口）
+	Vector2(25.0, 25.0),  # extraction_25x25 / std_25x25
+]
+## Boss 房与撤离房的房型不参与内容池洗牌，尺寸固定。
+const BOSS_ROOM_SIZE := Vector2(80.0, 100.0)
+const SIDE_DIRECTIONS := {
+	"north": Vector3(0.0, 0.0, -1.0),
+	"south": Vector3(0.0, 0.0, 1.0),
+	"west": Vector3(-1.0, 0.0, 0.0),
+	"east": Vector3(1.0, 0.0, 0.0),
+}
+
+var _expedition_snapshot: Dictionary = {}
+
+
+func _ready() -> void:
+	var failures: Array[String] = []
+	await _verify_catalog_and_menu(failures)
+	await _verify_loading_screen(failures)
+	_verify_plan_generator_seeds(failures)
+	_verify_constrained_generation_seeds(failures)
+	_verify_monster_drop_table_plan_contract(failures)
+	await _verify_expedition_level(failures)
+	await _verify_default_tower(failures)
+	await _verify_expedition_exit_contract(failures)
+	_report(failures)
+
+
+## 规划器多种子扫描（**内置回退路径** generate_expedition）：该路径只有「整图旋转/镜像」
+## 与「房型洗牌」两个随机量，两者都必须保持可建造（门间净距 ≥5m、房间不越界、不重叠）。
+## 数据驱动路径的对应扫描见 `_verify_constrained_generation_seeds`。
+func _verify_plan_generator_seeds(failures: Array[String]) -> void:
+	var layouts: Dictionary = {}
+	for seed_value in range(1, 97):
+		var plan := FloorPlanGenerator.generate_expedition({
+			"run_seed": seed_value, "expedition_id": "expedition_01",
+		})
+		if not bool(plan.get("valid", false)):
+			failures.append("种子 %d 的远征规划不可建造：%s" % [
+				seed_value, str(plan.get("validation_errors", [])),
+			])
+			continue
+		layouts[str(plan.get("layout_variant", ""))] = true
+		var ids: Array[String] = []
+		var types: Array[String] = []
+		for room_value in plan.get("rooms", []):
+			var spec := room_value as Dictionary
+			ids.append(str(spec.get("id", "")))
+			if str(spec.get("role", "")) == "main":
+				types.append(str(spec.get("type", "")))
+		if ids != BUILTIN_ROOM_IDS:
+			failures.append("种子 %d 房间清单不正确：%s" % [seed_value, [ids]])
+		var sorted_types := types.duplicate()
+		var expected_types := BUILTIN_ROOM_TYPE_POOL.duplicate()
+		sorted_types.sort()
+		expected_types.sort()
+		if sorted_types != expected_types:
+			failures.append("种子 %d 房型池不正确：%s" % [seed_value, [types]])
+	# 旋转 0/90/180/270 与镜像都必须真实出现过，否则「随机」是假的。
+	if layouts.size() < 4:
+		failures.append("远征关卡版图变体过少（随机未生效）：%s" % [layouts.keys()])
+
+
+## 数据驱动路径（constrained）的多种子扫描 —— 内置扫描的对应物。
+##
+## 为什么必须单独扫一遍：`mode = constrained` 的生成器一旦整体失效会**静默回退**到 L2 里
+## 存的那份样例坐标。回退后房间清单、尺寸、内容池**全都仍然正确**，单点断言完全看不出来，
+## 但「每局版图不一样」这件事已经没了。故这里逐种子断言 `used_fallback == false`。
+func _verify_constrained_generation_seeds(failures: Array[String]) -> void:
+	for index in range(16):
+		var seed_value := 700000 + index * 7919
+		var plan := FloorPlanGenerator.generate_from_level_plan(EXPEDITION_LEVEL_ID, 0, seed_value)
+		if plan.is_empty():
+			failures.append("数据驱动种子 %d 规划为空（设计源没读到）" % seed_value)
+			continue
+		if not bool(plan.get("valid", false)):
+			failures.append("数据驱动种子 %d 规划不可建造：%s" % [
+				seed_value, str(plan.get("validation_errors", [])),
+			])
+			continue
+		if bool(plan.get("used_fallback", false)):
+			failures.append("数据驱动种子 %d 回退到了 L2 样例（constrained 生成失效）" % seed_value)
+		if str(plan.get("trigger", "")) != "level_plan_data":
+			failures.append("数据驱动种子 %d 触发标记不是 level_plan_data：%s" % [
+				seed_value, str(plan.get("trigger", "")),
+			])
+		var main_keys := plan.get("main_path_keys", []) as Array
+		if main_keys != PLAN_MAIN_ROOM_IDS:
+			failures.append("数据驱动种子 %d 主路不正确：%s" % [seed_value, [main_keys]])
+		var ids: Array[String] = []
+		var content_types: Array[String] = []
+		var off_template: Array[String] = []
+		for room_value in plan.get("rooms", []):
+			var room := room_value as Dictionary
+			var room_id := str(room.get("id", ""))
+			var role := str(room.get("role", ""))
+			ids.append(room_id)
+			if role not in ["stair_entry", "stair_exit", "extraction", "boss", "boss_prep"]:
+				content_types.append(str(room.get("type", "")))
+			if not _is_template_size(room.get("dimensions", Vector2.ZERO) as Vector2):
+				off_template.append(room_id)
+		var sorted_ids := ids.duplicate()
+		var sorted_expected := PLAN_ROOM_IDS.duplicate()
+		sorted_ids.sort()
+		sorted_expected.sort()
+		if sorted_ids != sorted_expected:
+			failures.append("数据驱动种子 %d 房间集合不正确：%s" % [seed_value, sorted_ids])
+		var sorted_types := content_types.duplicate()
+		var sorted_pool := PLAN_CONTENT_TYPE_POOL.duplicate()
+		sorted_types.sort()
+		sorted_pool.sort()
+		if sorted_types != sorted_pool:
+			failures.append("数据驱动种子 %d 内容池不是池子的一个排列：%s" % [seed_value, content_types])
+		if not off_template.is_empty():
+			failures.append("数据驱动种子 %d 有房间尺寸不在模板集合内：%s" % [seed_value, off_template])
+
+
+func _verify_monster_drop_table_plan_contract(failures: Array[String]) -> void:
+	var first := FloorPlanGenerator.generate_from_level_plan(EXPEDITION_LEVEL_ID, 0, 77001199)
+	var second := FloorPlanGenerator.generate_from_level_plan(EXPEDITION_LEVEL_ID, 0, 77001200)
+	var table := first.get("monster_drop_table", {}) as Dictionary
+	var rows := table.get("rows", []) as Array
+	if rows.size() != 13:
+		failures.append("远征01运行时 plan 的怪物掉落表应有 13 行，实际 %d" % rows.size())
+	var monsters: Dictionary = {}
+	for value in rows:
+		var row := value as Dictionary
+		monsters[str(row.get("monster_id", ""))] = true
+	var monster_ids: Array = monsters.keys()
+	monster_ids.sort()
+	if monster_ids != ["exploder", "melee_chaser", "ranged_caster"]:
+		failures.append("远征01怪物掉落表应覆盖 3 种试点怪，实际 %s" % str(monster_ids))
+	if table != second.get("monster_drop_table", {}):
+		failures.append("怪物掉落表不应随版图种子变化")
+	# 掉落表是内容，不是几何：反向读生成器的 layout_id 函数段，防止后续误把字段
+	# 加进存档指纹。只搜该函数段，不会被上面的 plan 透传代码误命中。
+	var file := FileAccess.open("res://src/map/FloorPlanGenerator.gd", FileAccess.READ)
+	if file == null:
+		failures.append("无法读取 FloorPlanGenerator.gd 核对掉落表与 layout_id 隔离")
+	else:
+		var source := file.get_as_text()
+		var start := source.find("static func _data_driven_layout_id(")
+		var finish := source.find("\nstatic func ", start + 1)
+		var function_source := source.substr(start, finish - start if finish > start else source.length() - start)
+		if function_source.contains("monster_drop_table"):
+			failures.append("monster_drop_table 不得进入 _data_driven_layout_id（掉率调整不能让存档版图失配）")
+
+
+# —— 1) 基地目录动作 + 菜单冒烟 ——
+
+func _verify_catalog_and_menu(failures: Array[String]) -> void:
+	var def := BaseFacilityCatalog.get_definition("mission_operations")
+	if str(def.get("action_kind", "")) != BaseFacilityCatalog.ACTION_MENU:
+		failures.append("mission_operations 动作类型不是 menu：%s" % str(def.get("action_kind", "")))
+	if str(def.get("action_path", "")) != MENU_SCENE:
+		failures.append("mission_operations 目标菜单不是 RogueMapSelectMenu：%s" % str(def.get("action_path", "")))
+
+	var fixture: Dictionary = preload("res://tests/verification/helpers/hologram_city_fixture.gd").create(self)
+	var menu: RogueMapSelectMenu = fixture.menu
+	await get_tree().process_frame
+	var consts := _script_constants(menu)
+	if str(consts.get("LOADING_SCENE", "")) != LOADING_SCENE:
+		failures.append("全息城市未沿用读取界面")
+	if str(consts.get("LEVEL_SCENE", "")) != EXPEDITION_SCENE:
+		failures.append("默认目标不是远征01")
+	if not menu.find_children("*", "Control", true, false).is_empty():
+		failures.append("全息城市残留平面UI")
+	if menu._city == null or menu._city.markers.size() != 2:
+		failures.append("缺少两个立体入口")
+	elif menu._city.labels[0].text != "远征关卡01":
+		failures.append("默认入口未从关卡目录读取名称")
+	menu.request_close()
+	await get_tree().create_timer(0.15).timeout
+	if is_instance_valid(menu):
+		failures.append("关闭未完成相机返程")
+	fixture.host.queue_free()
+	await get_tree().process_frame
+
+func _verify_loading_screen(failures: Array[String]) -> void:
+	if not ResourceLoader.exists(LOADING_SCENE, "PackedScene"):
+		failures.append("读取界面场景不存在：%s" % LOADING_SCENE)
+		return
+	var packed := load(LOADING_SCENE) as PackedScene
+	var screen := packed.instantiate() as CanvasLayer
+	if screen == null:
+		failures.append("ExpeditionLoadingScreen 实例化失败")
+		return
+	# 刻意不入树：本界面的 _ready 在 headless 环境会立即 change_scene_to_file，
+	# 入树会把这份验收场景整个替换掉。这里只验证它的结构与目标路径。
+	var consts := _script_constants(screen)
+	if str(consts.get("LEVEL_SCENE", "")) != EXPEDITION_SCENE:
+		failures.append("读取界面未指向远征关卡场景：%s" % str(consts.get("LEVEL_SCENE", "")))
+	if float(consts.get("TOTAL_DURATION_S", 0.0)) <= 0.0:
+		failures.append("读取界面缺少正向过场时长")
+	var step_texts := consts.get("STEP_TEXTS", []) as Array
+	if step_texts.size() < 3:
+		failures.append("读取界面步骤文案不足：%d" % step_texts.size())
+	screen.call("_build_ui")
+	var root := screen.get_node_or_null("Root") as Control
+	if root == null:
+		failures.append("读取界面缺少 Root 层")
+	else:
+		var breadcrumb := screen.get_node_or_null("Root/Center/Breadcrumb") as Label
+		if breadcrumb == null or not breadcrumb.text.contains("远征情报室"):
+			failures.append("读取界面缺少「远征情报室 → 关卡」面包屑")
+		var title := screen.get_node_or_null("Root/Center/Title") as Label
+		if title == null or title.text != "远征关卡01":
+			failures.append("读取界面标题不是远征关卡01：%s" % (title.text if title != null else "<缺失>"))
+		var progress := screen.get_node_or_null("Root/Center/Progress") as ProgressBar
+		if progress == null or progress.max_value <= 0.0:
+			failures.append("读取界面缺少进度条")
+		var step := screen.get_node_or_null("Root/Center/Step") as Label
+		if step == null or step.text.is_empty():
+			failures.append("读取界面缺少步骤文案")
+	screen.free()
+
+
+# —— 3) 远征关卡本体 ——
+
+func _verify_expedition_level(failures: Array[String]) -> void:
+	var scene := load(EXPEDITION_SCENE) as PackedScene
+	if scene == null:
+		failures.append("ExpeditionLevel01_3D.tscn 加载失败")
+		return
+	var tower := scene.instantiate() as TowerDescent3D
+	if tower == null:
+		failures.append("ExpeditionLevel01_3D 实例化失败")
+		return
+	tower.test_mode = true
+	tower.run_seed_override = 77001199
+	add_child(tower)
+	await get_tree().process_frame
+	await get_tree().physics_frame
+
+	if not tower.is_expedition():
+		failures.append("远征关卡场景未开启 expedition_mode")
+	if tower.get_expedition_run_id() != "expedition_01":
+		failures.append("远征关卡运行时标识不正确：%s" % tower.get_expedition_run_id())
+	if str(tower.get_runtime_map_id()) != "expedition_01":
+		failures.append("远征关卡存档隔离标识不正确：%s" % str(tower.get_runtime_map_id()))
+	if tower.return_scene_path != GameDesignConfig.MAIN_SCENE:
+		failures.append("远征关卡退出落点不是玩家出发的塔楼 99F 基地：%s" % tower.return_scene_path)
+	var drop_snapshot := tower._reward_coordinator.level_drop_table_snapshot()
+	var loaded_monster_ids: Array = drop_snapshot.get("monster_ids", []) as Array
+	loaded_monster_ids.sort()
+	if str(drop_snapshot.get("level_id", "")) != EXPEDITION_LEVEL_ID:
+		failures.append("奖励协调器没有装载远征01掉落表：%s" % str(drop_snapshot))
+	if loaded_monster_ids != ["exploder", "melee_chaser", "ranged_caster"]:
+		failures.append("奖励协调器装载的关卡怪物集合不正确：%s" % str(loaded_monster_ids))
+	if not (drop_snapshot.get("errors", []) as Array).is_empty():
+		failures.append("奖励协调器装载关卡怪物表时报错：%s" % str(drop_snapshot.get("errors", [])))
+
+	# 单层：只有 floor_index 0，不存在 99F 基地、98—95F 战局与 94F 以下。
+	var planned_layers := tower.get_expedition_planned_floor_numbers()
+	if planned_layers != [0]:
+		failures.append("远征关卡不是单层：规划层索引=%s" % [planned_layers])
+	for forbidden_layer in [1, 2, 3, 4, 5, 6]:
+		if tower._floor_plan_snapshots.has(forbidden_layer):
+			failures.append("远征关卡不应规划层索引 %d" % forbidden_layer)
+	if tower._room_by_id.has("facility"):
+		failures.append("远征关卡不应存在 99F 基地房 facility")
+	if tower._room_by_id.has("floor_01_entry"):
+		failures.append("远征关卡不应存在塔楼 98F 房间 floor_01_entry")
+	if not (tower._elevator_facilities_by_floor as Dictionary).is_empty():
+		failures.append("远征关卡不应生成楼层电梯")
+
+	_verify_expedition_block(tower, failures)
+	_verify_clean_scene(tower, failures)
+	await _verify_level_enclosure(tower, failures)
+	_verify_expedition_rooms(tower, failures)
+	_verify_expedition_plan(tower, failures)
+	var start_room := _verify_safe_room(tower, failures)
+	_verify_door_policies(tower, failures)
+	_verify_extraction(tower, failures)
+	_verify_spawn_and_search(tower, failures)
+	await _verify_fate_on_door(tower, failures)
+
+	_expedition_snapshot = tower.build_runtime_save_snapshot()
+	if str(_expedition_snapshot.get("scope", "")) != "combat":
+		failures.append("远征关卡入口不是战局范围：%s" % str(_expedition_snapshot.get("scope", "")))
+	if str(_expedition_snapshot.get("runtime_map_id", "")) != "expedition_01":
+		failures.append("远征关卡行动快照缺少 expedition_01 隔离标记")
+
+	if start_room != null:
+		# 2026-10-13 业主指定：入口安全屋出生点 = **房间正中**。
+		# 旧口径是「朝前门方向偏 4 m」，玩家一睁眼就贴着通往 01 号房的门洞。
+		var spawn_offset := tower._expedition_entry_spawn_offset(start_room)
+		var spawn_horizontal := Vector2(spawn_offset.x, spawn_offset.z).length()
+		if spawn_horizontal > 0.05:
+			failures.append("远征关卡出生点未落在入口安全屋正中：%s" % spawn_offset)
+
+	_verify_hud_labels(tower, failures)
+	await _verify_background_music_disabled(tower, failures)
+
+	tower.queue_free()
+	await get_tree().process_frame
+	await get_tree().process_frame
+
+
+## HUD 文案门禁：远征关卡不得残留塔楼楼层/区域语义。
+## 这两处文案是运行时按 room_id 与 minimap 状态拼出来的字符串，
+## 几何、区块、包络校验全都看不见 —— 属于「数据全对但玩家看到错字」那一类，
+## 只能靠直接驱动房间进入、再读玩家真正看到的那条文案来守。
+func _verify_hud_labels(tower: TowerDescent3D, failures: Array[String]) -> void:
+	var level_name := tower.get_expedition_display_name()
+	var area_text := str(tower.call("_hud_floor_label_text"))
+	if area_text.contains("高塔外层") or area_text.contains("100F"):
+		failures.append("远征关卡地图区域标签残留塔楼语义：%s" % area_text)
+	elif not area_text.contains(level_name):
+		failures.append("远征关卡地图区域标签未标明关卡名：%s" % area_text)
+	var start_room := tower._room_by_id.get("start") as DungeonRoom3D
+	if start_room == null:
+		failures.append("HUD 文案门禁缺少入口安全屋")
+		return
+	# 真实驱动一次「进入房间」，断言顶栏上真正显示的那条文案。
+	tower.call("_on_room_entered", start_room)
+	var room_text := str(tower.room_label.text)
+	if room_text.contains("100F") or room_text.contains("99F"):
+		failures.append("远征关卡房间标签残留塔楼楼层语义：%s" % room_text)
+	elif not room_text.contains(level_name):
+		failures.append("远征关卡房间标签未标明关卡名：%s" % room_text)
+
+
+## 远征关卡不播全局背景音乐（2026-10-12 主人指定）。
+##
+## 为什么必须单独守：楼层音乐由 `TowerAtmosphere3D._update_music_for_floor()` 按
+## `floor_number` 分派，而远征是**单层关卡**、floor_index 恒为 0 ⇒ 落进「楼顶」分支、
+## 整关播 `rooftop_relax`。这条错在几何 / 区块 / 包络断言里**全都看不见**
+## （数据全对，只有喇叭在响），只能靠「开关契约 + 真实驱动一次房间进入」来钉。
+func _verify_background_music_disabled(
+	tower: TowerDescent3D, failures: Array[String]
+) -> void:
+	var atmosphere := tower._atmosphere as Node3D
+	if atmosphere == null:
+		failures.append("远征关卡缺少 TowerAtmosphere3D，无法核对背景音乐开关")
+		return
+	if bool(atmosphere.get("background_music_enabled")):
+		failures.append("远征关卡未关闭 background_music_enabled（整关会误播 rooftop_relax）")
+	var mgr := get_node_or_null("/root/MusicManager")
+	if mgr == null:
+		failures.append("MusicManager autoload 未注册，背景音乐断言失去意义")
+		return
+	var start_room := tower._room_by_id.get("start") as DungeonRoom3D
+	if start_room == null:
+		failures.append("背景音乐检查缺少入口安全屋 start")
+		return
+	# 效果断言：先人为挂上「上一场景残留」的那一首，再真实驱动一次房间进入
+	# （内部走 set_floor_number），必须被清成「无当前曲目」。
+	mgr.play("rooftop_relax")
+	await get_tree().process_frame
+	tower.call("_on_room_entered", start_room)
+	if not str(mgr.get_current_music_id()).is_empty():
+		failures.append("远征关卡仍在播放背景音乐：%s" % str(mgr.get_current_music_id()))
+
+
+func _verify_expedition_block(tower: TowerDescent3D, failures: Array[String]) -> void:
+	var block := tower.get_node_or_null("Blocks/Expedition") as Node3D
+	if block == null:
+		failures.append("远征关卡缺少 Blocks/Expedition 区块")
+		return
+	if str(block.get_meta("block_id", "")) != "expedition":
+		failures.append("Expedition 区块 block_id 不正确：%s" % str(block.get_meta("block_id", "")))
+	if str(block.get_meta("display_name", "")) != "远征关卡01":
+		failures.append("Expedition 区块 display_name 不正确：%s" % str(block.get_meta("display_name", "")))
+	if str(block.get_meta("runtime_owner", "")) != "TowerDescent3D":
+		failures.append("Expedition 区块 runtime_owner 不正确")
+
+
+## 干净场景契约（2026-09-19 起由「运行时减法」升级为「结构独立」）：
+##   远征关卡场景直接搭在公共关卡基座 `scenes/Dungeon3D.tscn` 上，**不再继承塔楼关卡
+##   场景** `scenes/TowerDescent3D.tscn`。于是塔楼专属内容不是「被运行时排除」，
+##   而是「根本不参与加载」——少一处运行时守卫就是一次污染的旧模型已经被拆掉。
+##   1) 场景文件不得把塔楼场景**作为 `ext_resource` 引入** —— 那才是「继承 /
+##      子实例化塔楼」，会让塔楼内容整棵随加载。
+##      ⚠️ 判据**不能**退化成「源文里出现了塔楼路径字符串」：远征的
+##      `return_scene_path` 合法地指向塔楼主场景（那是玩家出发点），它只是
+##      一个普通字符串属性，不含任何继承语义（2026-09-19 踩过这个误判）。
+##      也不得出现 99F 基地美术 `Blocks/Base/Art`：只置 visible=false 时它的
+##      碰撞体仍留在关卡地面上，形成「看不见却撞得到」的空气墙。
+##   2) `Blocks` 根下只允许远征自己的 `Blocks/Expedition`；`Rooftop` / `Base` /
+##      `Battle` / `Stairs` 必须**不存在**（一旦出现即说明又退回了继承塔楼场景，
+##      或有人在远征场景里手工加了塔楼容器）。
+##   3) 水平走廊必须挂在 `Blocks/Expedition` 下，而不是塔楼的 `Blocks/Battle`。
+func _verify_clean_scene(tower: TowerDescent3D, failures: Array[String]) -> void:
+	var scene_text := _read_text(EXPEDITION_SCENE)
+	if scene_text.is_empty():
+		failures.append("远征关卡场景文件不可读：%s" % EXPEDITION_SCENE)
+	else:
+		var tower_ref := 'path="%s"' % TOWER_SCENE
+		for line in scene_text.split("\n"):
+			var trimmed := line.strip_edges()
+			if not trimmed.begins_with("[ext_resource"):
+				continue
+			if trimmed.contains(tower_ref):
+				failures.append(
+					"远征关卡场景仍把塔楼场景 %s 作为 ext_resource 引入（继承/子实例化会让塔楼内容整棵随加载）" % TOWER_SCENE
+				)
+				break
+	if tower.get_node_or_null("Blocks/Base/Art") != null:
+		failures.append("远征关卡残留 99F 基地美术 Blocks/Base/Art（会在地面留下隐形碰撞）")
+	var blocks := tower.get_node_or_null("Blocks") as Node3D
+	if blocks == null:
+		failures.append("远征关卡缺少 Blocks 根节点")
+	else:
+		var names: Array[String] = []
+		for child in blocks.get_children():
+			names.append(str(child.name))
+		if names != ["Expedition"]:
+			failures.append("远征关卡 Blocks 子节点不是唯一的 Expedition：%s" % [names])
+		for block_name in ["Rooftop", "Base", "Battle", "Stairs"]:
+			if blocks.get_node_or_null(block_name) != null:
+				failures.append(
+					"远征关卡出现塔楼区块 Blocks/%s（场景已不继承塔楼，出现即回归）" % block_name
+				)
+	var expedition_block := tower.get_node_or_null("Blocks/Expedition") as Node3D
+	if expedition_block == null:
+		return
+	if (tower._corridor_by_edge as Dictionary).is_empty():
+		failures.append("远征关卡没有任何走廊连接，干净场景断言无法成立")
+	for edge_value in tower._corridor_by_edge.keys():
+		var corridor := tower._corridor_by_edge.get(edge_value) as Node3D
+		if corridor == null:
+			continue
+		if corridor.get_parent() != expedition_block:
+			failures.append("远征走廊 %s 不在 Blocks/Expedition 下（父节点：%s）" % [
+				corridor.name, str(corridor.get_parent()),
+			])
+
+
+## 关卡包围契约：远征是单层关卡，floor_index 同样是 0，最容易误继承 100F 天台窄轮廓
+## （90×80 + 99F 中庭洞）——那样 x>40 / z<-35 的房间与走廊会同时失去承重楼面与
+## 外圈墙，玩家直接掉出关卡，表现就是「房间没有阻挡」，故必须先断言标准网格已启用。
+##
+## 在标准网格前提下，楼面与外墙不再铺满塔楼整块 250×250，而是收缩到「7 个房间的
+## 实际包围盒 + 一格（5m）留白」（content bounds），于是远处空地上不会再立着一圈
+## 没有内容的墙。这里同时断言：内容外框覆盖全部房间、外墙可视高度与碰撞等高
+## （防隐形挡墙）、以及真实物理射线（脚下有楼面、四向有墙）。
+func _verify_level_enclosure(tower: TowerDescent3D, failures: Array[String]) -> void:
+	var stage := tower._floor_stages.get(0) as Node3D
+	if stage == null:
+		failures.append("远征关卡缺少 0 层楼面舞台")
+		return
+	var stage_snapshot: Dictionary = stage.get_snapshot()
+	if not bool(stage_snapshot.get("force_standard_map", false)):
+		failures.append("远征楼面舞台未显式启用标准网格，会继承天台窄轮廓：%s" % stage_snapshot)
+		return
+	if not bool(stage_snapshot.get("has_content_bounds", false)):
+		failures.append("远征楼面舞台没有按内容外框生成：%s" % stage_snapshot)
+		return
+	var content_rect := stage_snapshot.get("content_world_rect", Rect2()) as Rect2
+	if content_rect.size.x <= 0.0 or content_rect.size.y <= 0.0:
+		failures.append("远征内容外框退化为空：%s" % str(content_rect))
+		return
+	# 外框必须对齐 5m 网格，否则 _world_rect_to_grid 会产生非整数格映射。
+	var grid_unit: float = TowerFloorStage3D.GRID_UNIT
+	if not is_equal_approx(fmod(content_rect.size.x, grid_unit), 0.0) \
+			or not is_equal_approx(fmod(content_rect.size.y, grid_unit), 0.0):
+		failures.append("远征内容外框未对齐 %sm 网格：%s" % [str(grid_unit), str(content_rect)])
+	# 楼面与外圈墙必须共用同一外框，否则会出现悬空墙或楼面缺口。
+	if (stage_snapshot.get("floor_world_rect", Rect2()) as Rect2) != content_rect:
+		failures.append("远征楼面世界矩形与内容外框不一致：%s vs %s" % [
+			str(stage_snapshot.get("floor_world_rect")), str(content_rect),
+		])
+	# 全部 13 个房间都必须完整落在内容外框内，否则房间会悬空。
+	for room_id_value in PLAN_ROOM_IDS:
+		var room_id := str(room_id_value)
+		var room := tower._room_by_id.get(room_id) as DungeonRoom3D
+		if room == null:
+			continue
+		var dimensions := room.get_dimensions()
+		var room_rect := Rect2(
+			Vector2(room.position.x - dimensions.x * 0.5, room.position.z - dimensions.y * 0.5),
+			dimensions
+		)
+		if not content_rect.encloses(room_rect):
+			failures.append("房间 %s 不在远征内容外框内：%s ⊄ %s" % [
+				room_id, str(room_rect), str(content_rect),
+			])
+	if int(stage_snapshot.get("support_rect_count", 0)) < 1:
+		failures.append("远征楼面没有任何承重碰撞：%s" % stage_snapshot)
+	if bool(stage_snapshot.get("base_99_100_atrium_enabled", true)):
+		failures.append("远征单层关卡不应挖 99F 中庭洞，否则入口安全房会悬空")
+	if not is_equal_approx(
+		float(stage_snapshot.get("outer_wall_height", 0.0)), TowerGeometry3D.WALL_LOGICAL_HEIGHT_M
+	):
+		failures.append("远征外圈墙不是整墙高度：%s" % str(stage_snapshot.get("outer_wall_height")))
+	# 可视墙与碰撞墙必须等高：早期 floor_index==0 会把外墙可视高度误压到一半（0.5），
+	# 上半截就成了「看不见却挡人」的空气墙。只有真正的 100F 天台女儿墙才允许 0.5。
+	if not is_equal_approx(float(stage_snapshot.get("outer_visual_scale_y", 0.0)), 1.0):
+		failures.append("远征外圈墙可视高度被异常缩放（隐形挡墙风险）：%s" % str(
+			stage_snapshot.get("outer_visual_scale_y")
+		))
+	if str(stage.get_meta("block_id", "")) != "expedition":
+		failures.append("远征楼面舞台 block_id 不是 expedition：%s" % str(stage.get_meta("block_id", "")))
+
+	var space := tower.get_viewport().world_3d.direct_space_state
+	# 全关门的真实世界坐标：「这一格是门洞」的判据之一（见 _is_door_face）。
+	# 用 `room_door_world_<side>` meta 而不是现算：它就是走廊/门扇/门墙共用的那一份口径。
+	var door_positions := _collect_tower_door_positions(tower)
+	# 逐房：脚下必须有承重楼面，周界必须封闭。
+	for room_id_value in PLAN_ROOM_IDS:
+		var room_id := str(room_id_value)
+		var room := tower._room_by_id.get(room_id) as DungeonRoom3D
+		if room == null:
+			continue
+		var center := room.global_position
+		if _ray(space, center + Vector3(0, 3.0, 0), center + Vector3(0, -3.0, 0)).is_empty():
+			failures.append("%s 脚下没有承重楼面，玩家会掉出关卡" % room_id)
+		_verify_room_shell_seal(space, room, room_id, door_positions, failures)
+
+	# 走廊：房间之间是 10m 真实间隔，通道必须能提供地面与两侧墙。
+	var restored_edges: Dictionary = (tower._open_edges as Dictionary).duplicate()
+	for edge_value in tower._corridor_by_edge.keys():
+		var edge := str(edge_value)
+		var corridor := tower._corridor_by_edge[edge_value] as Node3D
+		if corridor == null:
+			continue
+		var start := corridor.get_meta("start_door_position", Vector3.ZERO) as Vector3
+		var end := corridor.get_meta("end_door_position", Vector3.ZERO) as Vector3
+		var mid := (start + end) * 0.5
+		# 🔴 零长度边（`allow_zero_length` 的**墙贴墙**连接）不是走廊：两房共墙、没有走廊地板，
+		# 开门就是两房直接相通。这类边另有判据（共享门/端口重合 + 逐房「脚下有承重楼面」），
+		# 拿走廊地面去量它必然假红 —— 平层房恰好因为中点落在房内地面而侥幸过关，
+		# 多标高房（Boss 房深井：高位入口 +12 / 平台 0）就立刻暴露。
+		if start.distance_to(end) <= 0.05:
+			continue
+		if _ray(space, mid + Vector3(0, 2.0, 0), mid + Vector3(0, -2.0, 0)).is_empty():
+			failures.append("走廊 %s 中点没有地面" % edge)
+		var direction := (end - start).normalized()
+		var perpendicular := Vector3(-direction.z, 0.0, direction.x)
+		tower._open_edges[edge] = true
+		tower.call("_update_corridor_streaming", edge.split("|")[0])
+		await get_tree().physics_frame
+		if not corridor.visible:
+			failures.append("走廊 %s 在房间门开启后仍不可见" % edge)
+		var from := mid + Vector3(0, 1.5, 0)
+		for sign_value in [-1.0, 1.0]:
+			if _ray(space, from, from + perpendicular * (sign_value * 3.5)).is_empty():
+				failures.append("走廊 %s 开启后缺少一侧侧墙阻挡" % edge)
+	tower._open_edges.clear()
+	tower._open_edges.merge(restored_edges)
+	tower.call("_update_corridor_streaming", str(tower._current_room_id))
+
+
+## —— 房间周界封闭性：逐 **5m 格面** 打物理射线（轮廓感知）——
+##
+## 为什么不再按「包围盒整边遍历 lane」判（本判据第一版就栽在这里）：
+## 轮廓房（`corridor_45x40` 的 L/U 形、`db_70x50` 的凹凸形）在**同一侧有多条平行边界段**，
+## 凹口所在的那两条 lane 本来就没有墙（凹口是房间以外的空地），按整边遍历必然把它们
+## 算成「打空」，于是轮廓房的某个侧面被误报「2 条 lane 打空」。
+##
+## 现在的判据不问轮廓、只问**房间里到底有什么**：
+##   ① 取本房自己的地砖（`authored_layout_instances` 里 `slot_role == floor_tile`）。
+##      地砖是**格心过滤**后铺的 —— 凹口那几格的格心落在多边形外，压根不出砖。
+##   ② 逐砖看四个 5m 邻格：邻格**没有本房地砖** ⇒ 本格与该邻格之间就是房间边界。
+##      轮廓沿 5m 格线切分（builder 的 `normalize_footprint` 校验过），所以
+##      「邻格无砖」⇔「该面落在多边形边界上」，凹口内墙 / 外边墙 / 共墙一视同仁，
+##      不需要把多边形本体搬进验收脚本。
+##   ③ 从砖心（**房间内部**）朝那个面外打 `2.5m(格心到墙面) + 0.5m(墙厚余量)` ⇒ 必须撞到碰撞体。
+##      凹口 lane 因为「格心在外」而根本没有砖 ⇒ 不进遍历，自然不会被误报。
+##
+## 允许打空的唯一情形：该面正好是**门洞**（`_is_door_face()`：本房或任一邻房在这个
+## 世界坐标上声明过门）。门墙留的是 5m 通洞，射线穿过去本来就该是空的。
+##
+## 没有地砖清单的房间（入口安全房走 v007 整房，不并入区块）回落 `_verify_room_shell_seal_rect()`。
+func _verify_room_shell_seal(
+	space: PhysicsDirectSpaceState3D,
+	room: DungeonRoom3D,
+	room_id: String,
+	door_positions: Array,
+	failures: Array[String]
+) -> void:
+	var cells := _authored_floor_tile_cells(room)
+	if cells.is_empty():
+		_verify_room_shell_seal_rect(space, room, room_id, failures)
+		return
+	# 2.5m 到墙面 + 0.5m 余量：够穿墙体碰撞（0.25m 厚、中心落在墙平面上），
+	# 又不足以碰到共墙另一侧邻房的东西（那些至少 5m 外）。
+	var probe_length := TowerFloorStage3D.GRID_UNIT * 0.5 + 0.5
+	var face_half := TowerFloorStage3D.GRID_UNIT * 0.5
+	for cell in cells.values():
+		var local := cell as Vector2
+		for side_value in SIDE_DIRECTIONS.keys():
+			var side := str(side_value)
+			var direction := SIDE_DIRECTIONS[side] as Vector3
+			var neighbour := local + Vector2(direction.x, direction.z) * TowerFloorStage3D.GRID_UNIT
+			if cells.has(_cell_key(neighbour)):
+				continue
+			# 探针高度 0.5m（不是 1.5m）：通道桥房的坑沿护栏只有 0.8m 高（业主裁决
+			# 2026-09-25「坑沿加护栏」，与坑壁共用同一件拉伸墙、墙顶露地面 0.8m），
+			# 1.5m 探针会**从护栏上方飞过**，把「坑壁就在那里」误判成「边界没有墙」。
+			# 0.5m 同时满足两条：高于地砖顶面（0.056）、低于门洞下沿（0.3~2.8 门洞的
+			# 下沿是 0.3m ⇒ 0.5m 仍在门洞净空内，不会把门洞当成实墙而假绿）。
+			var from := room.global_position + Vector3(local.x, 0.5, local.y)
+			if not _ray(space, from, from + direction * probe_length).is_empty():
+				continue
+			var face_center := from + direction * face_half
+			if _is_door_face(face_center, door_positions):
+				continue
+			failures.append(
+				"%s 的 %s 侧格心 (%.1f, %.1f) 那面墙没有碰撞体，且不是门洞（轮廓感知判据）"
+				% [room_id, side, local.x, local.y]
+			)
+
+
+## 轮廓房判据的兜底：矩形房（无地砖清单）仍按包围盒整边逐 lane 打射线。
+## 逐 **5m lane 中心** 打，而不是只打房间正中那一根：授权壳体的门洞正好开在某条 lane 上
+## （门洞跨 [lane−2.5, lane+2.5]），相邻实墙从 lane 边界起 ⇒「房间正中」一旦落在门洞边缘
+## 的接缝上，射线会从门叶碰撞与墙碰撞之间以浮点误差溜过去，被误报成「没有墙体阻挡」。
+## 判据同时比原来更严：**一条侧边最多只允许 1 条 lane 打空** —— 那 1 条就是该侧门洞。
+##
+## ⚠ 两个跨度不能混用（本判据第一版就在这里翻车：非方房整边假红）：
+##   length_span = 沿墙方向跨度（东西墙 → dimensions.y，南北墙 → dimensions.x）：决定 lane 数量。
+##   depth_span  = 房间中心到该侧墙的**法向**距离所属跨度（东西墙 → dimensions.x，
+##                 南北墙 → dimensions.y）：决定射线要打多远。
+## 方房两者相等，50×40 / 45×40 这类非方房一旦混用，reach 取短边半宽就会**够不到墙**
+## ⇒ 整边 lane 全部打空（boss east/west：reach=23 但实距 25）。
+func _verify_room_shell_seal_rect(
+	space: PhysicsDirectSpaceState3D, room: DungeonRoom3D, room_id: String,
+	failures: Array[String]
+) -> void:
+	var center := room.global_position
+	var dimensions := room.get_dimensions()
+	for side_value in SIDE_DIRECTIONS.keys():
+		var side := str(side_value)
+		var length_span := dimensions.x if side in ["north", "south"] else dimensions.y
+		var depth_span := dimensions.y if side in ["north", "south"] else dimensions.x
+		var lane_count := int(round(length_span / TowerFloorStage3D.GRID_UNIT))
+		var reach := depth_span * 0.5 + 3.0
+		var open_lanes := 0
+		for lane_index in range(lane_count):
+			var offset := (
+				-length_span * 0.5 + TowerFloorStage3D.GRID_UNIT * (float(lane_index) + 0.5)
+			)
+			var from := center + Vector3(0, 1.5, 0)
+			if side in ["east", "west"]:
+				from.z += offset
+			else:
+				from.x += offset
+			if _ray(space, from, from + (SIDE_DIRECTIONS[side] as Vector3) * reach).is_empty():
+				open_lanes += 1
+		if open_lanes >= lane_count:
+			failures.append(
+				"%s 的 %s 侧整边没有墙体阻挡（%d 条 lane 全部打空）" % [room_id, side, lane_count]
+			)
+		elif open_lanes > 1:
+			failures.append(
+				"%s 的 %s 侧有 %d 条 lane 打空，该侧最多只允许 1 条门洞 lane"
+				% [room_id, side, open_lanes]
+			)
+
+
+## 本房授权壳体清单里的地砖格心（房间局部 `(x, z)`），键 = 格心量化串（供邻格查找）。
+## 空字典 = 本房没有授权壳体（走 v007 整房 / 程序化壳体）⇒ 调用方回落矩形判据。
+func _authored_floor_tile_cells(room: DungeonRoom3D) -> Dictionary:
+	var cells: Dictionary = {}
+	for value in room.authored_layout_instances:
+		var instance := value as Dictionary
+		if str(instance.get("slot_role", "")) != "floor_tile":
+			continue
+		var position := instance.get("position", Vector3.ZERO) as Vector3
+		var local := Vector2(position.x, position.z)
+		cells[_cell_key(local)] = local
+	return cells
+
+
+## 格心量化键：0.1m 量化后取整，吸收 Blender 房型源里不超过 0.04m 的建模浮点漂移。
+## 格距是 5m，10cm 量化仍有 50 倍安全余量，不会把相邻地砖合并；旧 1cm 量化会把
+## 7.4888m / 7.5386m 这类本应位于 7.5m 格心的砖误判成独立格，进而把砖间内边界当外墙。
+func _cell_key(local: Vector2) -> String:
+	return "%d|%d" % [roundi(local.x * 10.0), roundi(local.y * 10.0)]
+
+
+## 全关门的真实世界坐标（`room_door_world_<side>`，由 `_plan_room_layout()` 统一写入）。
+## 收集**所有房间**的：共墙上的门可能只被邻房那条记录覆盖（门是共享的，两侧都算门洞）。
+func _collect_tower_door_positions(tower: TowerDescent3D) -> Array:
+	var positions: Array = []
+	for room_value in tower._room_by_id.values():
+		var room := room_value as DungeonRoom3D
+		if room == null:
+			continue
+		for side in room.doors:
+			var key := "room_door_world_%s" % str(side)
+			if room.has_meta(key):
+				positions.append(room.get_meta(key) as Vector3)
+	return positions
+
+
+## 这个格面是不是门洞：任一门的世界坐标在水平面上与格面中心重合（容差 0.75m，
+## 小于半个格宽 2.5m，不会把相邻格误判成门）。
+func _is_door_face(face_center: Vector3, door_positions: Array) -> bool:
+	var flat := Vector2(face_center.x, face_center.z)
+	for value in door_positions:
+		var door := value as Vector3
+		if flat.distance_to(Vector2(door.x, door.z)) <= 0.75:
+			return true
+	return false
+
+
+func _ray(space: PhysicsDirectSpaceState3D, from: Vector3, to: Vector3) -> Dictionary:
+	var query := PhysicsRayQueryParameters3D.create(from, to)
+	query.collide_with_areas = false
+	query.collide_with_bodies = true
+	return space.intersect_ray(query)
+
+
+func _verify_expedition_rooms(tower: TowerDescent3D, failures: Array[String]) -> void:
+	# 房间清单按**排序后的集合**比：constrained 生成路径按拓扑顺序插入房间，
+	# 与「生成失败回退样例」的文件序不同 ⇒ 顺序不是契约（见 PLAN_ROOM_IDS 注释）。
+	var ids: Array[String] = []
+	for value in tower.get_expedition_room_ids():
+		ids.append(str(value))
+	var sorted_ids := ids.duplicate()
+	var sorted_expected := PLAN_ROOM_IDS.duplicate()
+	sorted_ids.sort()
+	sorted_expected.sort()
+	if sorted_ids != sorted_expected:
+		failures.append("远征关卡房间清单不正确：%s（期望 %s）" % [sorted_ids, sorted_expected])
+	for room_id_value in PLAN_ROOM_IDS:
+		var room_id := str(room_id_value)
+		var room := tower._room_by_id.get(room_id) as DungeonRoom3D
+		if room == null:
+			failures.append("远征关卡缺少房间 %s" % room_id)
+			continue
+		if room.name != room_id:
+			failures.append("%s 节点名被改写为 %s" % [room_id, room.name])
+		var parent := room.get_parent()
+		if parent == null or str(parent.name) != "Expedition":
+			failures.append("%s 不在 Blocks/Expedition 内：%s" % [room_id, str(room.get_path())])
+		if str(room.get_meta("block_id", "")) != "expedition":
+			failures.append("%s 的 block_id 元数据不是 expedition：%s" % [
+				room_id, str(room.get_meta("block_id", "")),
+			])
+		# 尺寸：入口 / Boss / 撤离三间房型固定（不参与内容池洗牌）；其余 10 间内容房
+		# 的房型每局按种子抽 ⇒ 只断言「尺寸落在 8 个模板的尺寸集合里」。
+		var dimensions := room.get_dimensions()
+		if room_id == "start":
+			if not dimensions.is_equal_approx(SAFE_ROOM_SIZE):
+				failures.append("入口安全屋尺寸不是 15×15：%s" % dimensions)
+		elif room_id == "boss":
+			if not dimensions.is_equal_approx(BOSS_ROOM_SIZE):
+				failures.append("Boss 房尺寸不是 80×100（深井房）：%s" % dimensions)
+		elif room_id == "extraction":
+			if not dimensions.is_equal_approx(EXPEDITION_ROOM_SIZE):
+				failures.append("撤离房尺寸不是 25×25：%s" % dimensions)
+		elif not _is_template_size(dimensions):
+			failures.append("%s 尺寸不在 8 个房型模板内：%s" % [room_id, dimensions])
+	if not tower.get_first_safe_room_dimensions().is_equal_approx(SAFE_ROOM_SIZE):
+		failures.append("远征关卡首间安全房尺寸不是 15×15：%s" % tower.get_first_safe_room_dimensions())
+
+
+func _verify_expedition_plan(tower: TowerDescent3D, failures: Array[String]) -> void:
+	var plan := tower._floor_plan_snapshots.get(0, {}) as Dictionary
+	if plan.is_empty():
+		failures.append("远征关卡缺少单层规划快照")
+		return
+	if not bool(plan.get("valid", false)):
+		failures.append("远征关卡规划校验未通过：%s" % str(plan.get("validation_errors", [])))
+	# 规划来源判据：期望**由设计源推出**，不写死「应该走哪条路」。
+	# 两条路径写进来的 mode 不是同一个概念 —— 内置远征生成器（generate_expedition）写
+	# mode="expedition" 并带 trigger="expedition_bootstrap"；数据驱动路径
+	# （generate_from_level_plan，由 L1 generation_policy.runtime_enabled 开启）写的是 L2
+	# 文件的 mode（合法值只有 LevelPlanLoader.VALID_MODES 的 authored / constrained），
+	# 来源改由 trigger="level_plan_data" 标明。
+	# 为什么从设计源推：开关被误开或被误关都必须红。若只放行「二者之一」，开关被悄悄关掉
+	# 时这条断言仍然绿 —— 那等于把「版图几何从哪来」的契约又丢了。
+	var plan_mode := str(plan.get("mode", ""))
+	var plan_trigger := str(plan.get("trigger", ""))
+	if FloorPlanGenerator.data_driven_enabled(EXPEDITION_LEVEL_ID):
+		if plan_trigger != "level_plan_data":
+			failures.append(
+				"远征关卡声明了 runtime_enabled 却仍走内置房表：trigger=%s" % plan_trigger
+			)
+	elif plan_mode != "expedition":
+		failures.append(
+			"远征关卡未声明 runtime_enabled，规划却不是内置远征口径：mode=%s" % plan_mode
+		)
+	# 本局必须真的现算出来，而不是回退到 L2 样例 —— 回退后清单/尺寸/内容池全对，
+	# 单看几何断言看不出来，但「每局版图不同」已经失效（见 _verify_constrained_generation_seeds）。
+	if plan_mode == "constrained" and bool(plan.get("used_fallback", false)):
+		failures.append("远征关卡 constrained 生成回退到了 L2 样例（随机化失效）")
+	if str(plan.get("terminal_mode", "")) != "extraction_room":
+		failures.append("远征关卡终局模式不是撤离房：%s" % str(plan.get("terminal_mode", "")))
+	# 主路 01—10（数据驱动路径）。内置回退路径是 01—05，那份期望值由种子扫描单独守。
+	var main_keys := plan.get("main_path_keys", []) as Array
+	var expected_main: Array = PLAN_MAIN_ROOM_IDS.duplicate()
+	if main_keys != expected_main:
+		failures.append("远征关卡主通道不是 01—10 号房：%s" % [main_keys])
+	# 拓扑计数：10 间内容房（全部在主路 room_01…room_10）、支线已取消（0 条）。
+	if int(plan.get("content_room_count", -1)) != PLAN_CONTENT_ROOM_IDS.size():
+		failures.append("远征关卡内容房不是 10 间：%d" % int(plan.get("content_room_count", -1)))
+	if int(plan.get("branch_count", -1)) != 0:
+		failures.append("远征关卡支线已取消，顶级支线应为 0 条：%d" % int(plan.get("branch_count", -1)))
+	if int(plan.get("branch_room_count", -1)) != 0:
+		failures.append("远征关卡支线已取消，支线房应为 0 间：%d" % int(plan.get("branch_room_count", -1)))
+	# 撤离房父房：是拓扑，不随种子变。
+	for room_value in plan.get("rooms", []):
+		var spec := room_value as Dictionary
+		var key := str(spec.get("key", ""))
+		if key != "extraction":
+			continue
+		# 撤离房必须挂在 Boss 之后 —— 主路最后一间是 room_10，Boss 才是它的父房。
+		if str(spec.get("parent_key", "")) != PLAN_EXTRACTION_PARENT:
+			failures.append("撤离房父房不是 %s：%s" % [
+				PLAN_EXTRACTION_PARENT, str(spec.get("parent_key", "")),
+			])
+		if not (spec.get("dimensions", Vector2.ZERO) as Vector2).is_equal_approx(EXPEDITION_ROOM_SIZE):
+			failures.append("撤离房不是 25×25：%s" % str(spec.get("dimensions", Vector2.ZERO)))
+	# 内容池：10 间内容房按种子洗牌，但 10 项对 10 间 ⇒ 多重集恒等于池子。
+	var actual_types: Array[String] = []
+	for room_id in PLAN_CONTENT_ROOM_IDS:
+		var room := tower._room_by_id.get(room_id) as DungeonRoom3D
+		if room != null:
+			actual_types.append(room.room_type)
+	var sorted_actual := actual_types.duplicate()
+	var sorted_expected := PLAN_CONTENT_TYPE_POOL.duplicate()
+	sorted_actual.sort()
+	sorted_expected.sort()
+	if sorted_actual != sorted_expected:
+		failures.append("远征关卡内容池不正确：%s（期望 %s）" % [actual_types, PLAN_CONTENT_TYPE_POOL])
+	if actual_types.count("COMBAT") < 2:
+		failures.append("远征关卡战斗房不足 2 间，无法保证刷怪：%s" % [actual_types])
+	var has_search_room := actual_types.has("SCAVENGE") or actual_types.has("STORAGE")
+	if not has_search_room:
+		failures.append("远征关卡缺少可搜索房：%s" % [actual_types])
+
+
+func _verify_safe_room(tower: TowerDescent3D, failures: Array[String]) -> DungeonRoom3D:
+	var start_room := tower._room_by_id.get("start") as DungeonRoom3D
+	if start_room == null:
+		failures.append("远征关卡缺少入口安全屋 start")
+		return null
+	if start_room.room_type != "STAIR_LOBBY":
+		failures.append("入口安全屋类型不是 STAIR_LOBBY：%s" % start_room.room_type)
+	var snapshot := start_room.get_room_snapshot()
+	if str(snapshot.get("safe_room_art_version", "")) != SAFE_ROOM_ART_VERSION:
+		failures.append("远征关卡入口未接入 v007 安全房美术：%s" % snapshot)
+	# 期望值由 SAFE_ROOM_CORNER_IDS / SAFE_ROOM_WALL_SLOTS 推出，不硬编码：
+	# 四角补 L 件后每条边两端各 5m 让位给 L 臂，直墙只留中段槽位（15m = 5 + 5 + 5），
+	# 实墙 = 中段槽位数 − 门墙数（门洞本来就在中段）。见 DungeonRoom3D._build_safe_room_shell。
+	if not bool(snapshot.get("safe_room_corner_l", false)):
+		failures.append("远征入口安全房未启用四角 L 型墙角：%s" % snapshot)
+	var expected_corner_count := DungeonRoom3D.SAFE_ROOM_CORNER_IDS.size()
+	if int(snapshot.get("safe_room_corner_module_count", -1)) != expected_corner_count:
+		failures.append("安全房四角 L 件不是 %d 件：%s" % [expected_corner_count, snapshot])
+	var expected_door_wall_count := start_room.doors.size()
+	var expected_solid_wall_count := maxi(
+		0, DungeonRoom3D.safe_room_middle_slot_count() - expected_door_wall_count
+	)
+	if int(snapshot.get("safe_room_wall_module_count", -1)) != expected_solid_wall_count:
+		failures.append("安全房实墙不是 %d 段：%s" % [expected_solid_wall_count, snapshot])
+	if int(snapshot.get("safe_room_door_wall_module_count", -1)) != expected_door_wall_count:
+		failures.append("安全房门墙不是 %d 段：%s" % [expected_door_wall_count, snapshot])
+	if int(snapshot.get("safe_room_floor_tile_count", -1)) != 9:
+		failures.append("安全房地砖不是 9 块：%s" % snapshot)
+	# 期望值由常量推出，不硬编码数字：房间包清单会随美术需求增删（2026-09-20 已由
+	# 17 减到 15），硬编码会在每次去件时误红。此处只盯「清单里的包全部装配成功」。
+	var expected_package_count := DungeonRoom3D.SAFE_ROOM_PACKAGE_IDS.size()
+	if int(snapshot.get("safe_room_package_count", -1)) != expected_package_count:
+		failures.append("安全房房间包不是 %d 个：%s" % [expected_package_count, snapshot])
+	_verify_safe_room_facility_blocking(start_room, expected_package_count, failures)
+	if start_room.doors.size() != 2:
+		failures.append("安全房必须保留双门结构：%s" % [start_room.doors])
+	else:
+		var axis_of := {
+			"north": "z", "south": "z", "east": "x", "west": "x",
+		}
+		var first_axis := ""
+		var second_axis := ""
+		if start_room.doors.size() == 2:
+			first_axis = str(axis_of.get(str(start_room.doors[0]), ""))
+			second_axis = str(axis_of.get(str(start_room.doors[1]), ""))
+		if first_axis.is_empty() or first_axis == second_axis:
+			failures.append("安全房两扇门不互相垂直：%s" % [start_room.doors])
+	var open_target_count := 0
+	var closed_target_count := 0
+	var retreat_door_count := 0
+	var retreat_side := ""
+	for side_value in start_room.door_targets.keys():
+		var side := str(side_value)
+		if str(start_room.door_targets[side_value]).is_empty():
+			closed_target_count += 1
+			retreat_side = side
+			var retreat_door := start_room.get_door_node(side)
+			if retreat_door != null and retreat_door.get_interaction_prompt_text() == "[E] 退出战局":
+				retreat_door_count += 1
+		else:
+			open_target_count += 1
+	if open_target_count != 1:
+		failures.append("安全房应有唯一前门目标：%s" % [start_room.door_targets])
+	if closed_target_count != 1:
+		failures.append("安全房应有唯一封闭抵达门：%s" % [start_room.door_targets])
+	if retreat_door_count != 1:
+		failures.append("安全房未注册唯一退出战局门：%d" % retreat_door_count)
+	var front_targets: Array[String] = []
+	for target_value in start_room.door_targets.values():
+		if not str(target_value).is_empty():
+			front_targets.append(str(target_value))
+	if front_targets != ["room_01"]:
+		failures.append("安全房前门目标不是 01 号房：%s" % [front_targets])
+	# 入口安全房不得产出房间钥匙：它唯一的正常前门（→ room_01）是免费通行，
+	# 另一扇是 [E] 退出战局门（`door_targets` 该侧为空，从不走 `_try_open_room_door`）——
+	# 钥匙在这间房里永远用不掉，属于纯垃圾掉落（2026-10-12 人报「安全房默认刷钥匙」）。
+	# 反例盯法：删掉 `Dungeon3D._room_produces_room_key` 里「跳过 target 为空的门」那一段，
+	# 本断言必红。
+	if bool(tower.call("_room_produces_room_key", start_room)):
+		failures.append("入口安全房不得产出房间钥匙（其两扇门均不消耗钥匙）")
+	_verify_safe_room_exit_sign(start_room, retreat_side, failures)
+	return start_room
+
+
+## 出口提示牌（`ENV-BATTLE-EXIT-NEON-SIGN`）：退出门内侧地面必须平铺一块 EXIT 霓虹标牌。
+##
+## 🔴 为什么必须由门禁盯着：入口房有**两条**壳体路径 —— 塔楼/程序化走
+## `_build_safe_room_shell()`，而远征01 的 start 房走**静态布局 TSCN**
+## （`_build_shell()` 静态分支提前 `return`，压根不经过 `_build_safe_room_shell`）。
+## 2026-10-12 首版只补了前者 ⇒ 远征入口房静默无牌（业主反馈「远征入口安全屋也要放一个」）。
+## 反向对照：删掉 `_build_shell()` 静态分支里那次 `_build_safe_room_exit_sign()` 调用，本断言必红。
+func _verify_safe_room_exit_sign(
+	start_room: DungeonRoom3D, retreat_side: String, failures: Array[String]
+) -> void:
+	var sign_node := start_room.get_node_or_null(
+		DungeonRoom3D.SAFE_ROOM_EXIT_SIGN_NODE_NAME
+	) as Node3D
+	if sign_node == null:
+		failures.append("入口安全房缺少 EXIT 出口提示牌（退出门=%s）" % retreat_side)
+		return
+	if str(sign_node.get_meta("exit_sign_asset_id", "")) != DungeonRoom3D.SAFE_ROOM_EXIT_SIGN_ASSET_ID:
+		failures.append("EXIT 标牌 AssetID 不符：%s" % sign_node.get_meta("exit_sign_asset_id", ""))
+	if str(sign_node.get_meta("exit_sign_direction", "")) != retreat_side:
+		failures.append("EXIT 标牌没摆在退出门：牌=%s 门=%s" % [
+			sign_node.get_meta("exit_sign_direction", ""), retreat_side,
+		])
+	if not bool(sign_node.get_meta("visual_only", false)):
+		failures.append("EXIT 标牌未声明 visual_only（地面装饰不得阻挡）")
+	if not sign_node.find_children("*", "StaticBody3D", true, false).is_empty():
+		failures.append("EXIT 标牌带 StaticBody3D（会在走行面制造隐形台阶）")
+	# 发光面必须朝上：本地 -Z 经运行时旋转后应指向世界 +Y。
+	var facing := -(sign_node.global_transform.basis.z).normalized()
+	if absf(facing.y - 1.0) > 0.02:
+		failures.append("EXIT 标牌未面朝上：%s" % str(facing))
+	# 世界 AABB：背面贴走行面 + 整块落在房间里（不穿墙）。
+	var mn := Vector3.INF
+	var mx := -Vector3.INF
+	var mesh_count := 0
+	for value in sign_node.find_children("*", "MeshInstance3D", true, false):
+		var mesh_instance := value as MeshInstance3D
+		if mesh_instance == null or mesh_instance.mesh == null:
+			continue
+		mesh_count += 1
+		var box := mesh_instance.mesh.get_aabb()
+		for corner in range(8):
+			var world: Vector3 = sign_node.global_transform * box.get_endpoint(corner)
+			mn = mn.min(world)
+			mx = mx.max(world)
+	if mesh_count == 0:
+		failures.append("EXIT 标牌内没有网格")
+		return
+	var room_origin := start_room.global_position
+	var half := minf(start_room.get_dimensions().x, start_room.get_dimensions().y) * 0.5
+	var local_min := mn - room_origin
+	var local_max := mx - room_origin
+	if absf(local_min.y) > 0.02:
+		failures.append("EXIT 标牌背面未贴走行面：底面 y=%.4f" % local_min.y)
+	if local_min.x < -half or local_max.x > half or local_min.z < -half or local_max.z > half:
+		failures.append("EXIT 标牌超出房间边界（可能穿墙）：%s ~ %s" % [str(local_min), str(local_max)])
+	# 长边平行门洞：门法向那一轴的占地是牌深，另一轴是牌宽（尺寸由资产包络推出，不写死）。
+	var normal := start_room.call("_direction_normal", retreat_side) as Vector3
+	var normal_along_x := absf(normal.x) > 0.99
+	var depth_extent := absf(local_max.x - local_min.x) if normal_along_x else absf(local_max.z - local_min.z)
+	var width_extent := absf(local_max.z - local_min.z) if normal_along_x else absf(local_max.x - local_min.x)
+	var declared := sign_node.get_meta("bounds_size_m", Vector3.ZERO) as Vector3
+	var expect_depth := declared.y if declared.y > 0.0 else 0.76
+	var expect_width := declared.x if declared.x > 0.0 else 1.84
+	if absf(depth_extent - expect_depth) > 0.05:
+		failures.append("EXIT 标牌沿门法向占地 %.3f 不符 %.2f" % [depth_extent, expect_depth])
+	if absf(width_extent - expect_width) > 0.05:
+		failures.append("EXIT 标牌平行门洞长边 %.3f 不符 %.2f" % [width_extent, expect_width])
+
+
+## 2026-09-20：安全房房间包补齐了「内嵌玩法阻挡」（范例 B：模型 + 碰撞同包）。
+## 在这之前 15 个包的 collision_owner 指向 godot_0p30m_structural_proxy —— 一个全仓
+## 并不存在的代理，于是设施全部可穿模。本函数盯三件事，期望值全部由包自身 metadata
+## 与走行面常量推出，不硬编码件数/尺寸：
+##   1. 元数据真实性：collision_shape_count 必须等于实测启用形状数（双向：多一个少一个都红）
+##   2. 几何契约：碰撞盒必须是 BoxShape3D 且尺寸 == bounds_size_m
+##   3. 可达性：盒子的竖直区间必须与「走行面以上 FACILITY_BLOCK_BAND_MAX_Y」有交
+##      —— 挡住看不到的东西不算挡，浮在 4m 高的盒子对玩家等价于不存在
+func _verify_safe_room_facility_blocking(
+	start_room: DungeonRoom3D, expected_package_count: int, failures: Array[String]
+) -> void:
+	var art_root := start_room.get_node_or_null("SafeRoomArtRoot")
+	if art_root == null:
+		failures.append("安全房缺少 SafeRoomArtRoot，无法核对房间包阻挡")
+		return
+	var checked := 0
+	var blocking := 0
+	var declared_total := 0
+	for value in art_root.get_children():
+		var package := value as Node3D
+		if package == null or not package.name.begins_with("SafeRoomPackage_"):
+			continue
+		checked += 1
+		var slug := str(package.get_meta("slug", package.name))
+		var declared := int(package.get_meta("collision_shape_count", -1))
+		var bounds := package.get_meta("bounds_size_m", Vector3.ZERO) as Vector3
+		var live := 0
+		for body_value in package.find_children("*", "StaticBody3D", true, false):
+			var body := body_value as StaticBody3D
+			if body.collision_layer == 0:
+				continue
+			for shape_value in body.find_children("*", "CollisionShape3D", true, false):
+				var shape := shape_value as CollisionShape3D
+				if shape.disabled or shape.shape == null:
+					continue
+				live += 1
+				var box := shape.shape as BoxShape3D
+				if box == null:
+					failures.append("%s 阻挡形状不是 BoxShape3D" % slug)
+					continue
+				if not box.size.is_equal_approx(bounds):
+					failures.append("%s 碰撞盒 %s != bounds_size_m %s" % [
+						slug, box.size, bounds
+					])
+				var bottom := shape.global_position.y - box.size.y * 0.5
+				var top := shape.global_position.y + box.size.y * 0.5
+				if bottom > FACILITY_BLOCK_BAND_MAX_Y or top < 0.0:
+					failures.append("%s 碰撞盒 y=[%.2f..%.2f] 与玩家身位无交，等于没挡" % [
+						slug, bottom, top
+					])
+		if declared != live:
+			failures.append("%s 元数据 collision_shape_count=%d 与实测启用形状数 %d 不一致" % [
+				slug, declared, live
+			])
+		declared_total += declared
+		if declared > 0:
+			blocking += 1
+	# 防假绿哨兵：脚本报错会静默中断，0 样本断言恒真。
+	if checked != expected_package_count:
+		failures.append("哨兵：核对到的房间包 %d 件 != 清单 %d 件" % [checked, expected_package_count])
+	if blocking == 0:
+		failures.append("哨兵：有阻挡的房间包样本为 0，阻挡断言恒真、结论不可信")
+	if declared_total == 0:
+		failures.append("哨兵：所有房间包声明的碰撞形状数合计为 0，设施可穿模")
+
+
+func _verify_door_policies(tower: TowerDescent3D, failures: Array[String]) -> void:
+	# 入口门是固定交通接口：免费开启，不弹命运卡。
+	var entry_policy := tower._door_policy_for_edge("start", "room_01")
+	for key in ["requires_clear", "requires_key", "triggers_fate"]:
+		if bool(entry_policy.get(key, true)):
+			failures.append("安全屋→01 号房入口门应为免费通行：%s" % entry_policy)
+	# 01 之后恢复默认清房 / 钥匙 / 命运卡（含通道桥房 room_05→room_06 这一段）。
+	for edge_index in range(PLAN_MAIN_ROOM_IDS.size() - 1):
+		var from_id := PLAN_MAIN_ROOM_IDS[edge_index]
+		var to_id := PLAN_MAIN_ROOM_IDS[edge_index + 1]
+		var policy := tower._door_policy_for_edge(from_id, to_id)
+		for key in ["requires_clear", "requires_key", "triggers_fate"]:
+			if not bool(policy.get(key, false)):
+				failures.append("%s→%s 门策略应保留默认：%s" % [from_id, to_id, policy])
+
+
+func _verify_extraction(tower: TowerDescent3D, failures: Array[String]) -> void:
+	if not tower.has_expedition_extraction():
+		failures.append("远征关卡未装配可用撤离信标")
+		return
+	var beacon := tower._extraction as ExtractionBeacon3D
+	var extraction_room := tower._room_by_id.get("extraction") as DungeonRoom3D
+	if extraction_room == null:
+		failures.append("远征关卡缺少终点撤离房")
+		return
+	if extraction_room.room_type != "EXTRACTION":
+		failures.append("终点房类型不是 EXTRACTION：%s" % extraction_room.room_type)
+	if beacon == null:
+		failures.append("撤离信标为空")
+		return
+	if beacon.beacon_type != "STANDARD":
+		failures.append("远征撤离信标不是常驻可用的 STANDARD：%s" % beacon.beacon_type)
+	if beacon.locked:
+		failures.append("远征撤离信标不应上锁")
+	if beacon.get_parent() != extraction_room:
+		failures.append("撤离信标不在终点撤离房内：%s" % str(beacon.get_path()))
+	if (tower._conditional_extractions.get("STANDARD") as ExtractionBeacon3D) != beacon:
+		failures.append("撤离信标未登记进条件撤离表")
+
+
+func _verify_spawn_and_search(tower: TowerDescent3D, failures: Array[String]) -> void:
+	# 刷怪：进入第一间战斗房后必须出现敌人。
+	var combat_id := ""
+	for room_id in PLAN_CONTENT_ROOM_IDS:
+		var room := tower._room_by_id.get(room_id) as DungeonRoom3D
+		if room == null:
+			continue
+		if combat_id.is_empty() and room.room_type == "COMBAT":
+			combat_id = room_id
+	if combat_id.is_empty():
+		failures.append("远征关卡没有战斗房，无法验证刷怪")
+	else:
+		var combat_room := tower._room_by_id.get(combat_id) as DungeonRoom3D
+		combat_room.cleared = false
+		tower._current_room_id = ""
+		tower._on_room_entered(combat_room)
+		if int(tower._alive_by_room.get(combat_id, 0)) <= 0:
+			failures.append("进入战斗房 %s 后没有生成敌人" % combat_id)
+		var enemies := tower.find_children("*", "Enemy3D", true, false)
+		if enemies.is_empty():
+			failures.append("远征关卡场景树里没有 Enemy3D 节点")
+	# 搜索：可搜索房必须存在，且全场搜索容器全部接入搜索回调。
+	# 房间细节按需构建，验收前先显式 ensure_detail_built()。
+	var search_room_id := ""
+	var searchable_total := 0
+	var wired_searchable := 0
+	for room_id in PLAN_CONTENT_ROOM_IDS:
+		var room := tower._room_by_id.get(room_id) as DungeonRoom3D
+		if room == null:
+			continue
+		room.ensure_detail_built()
+		if search_room_id.is_empty() and room.room_type in ["SCAVENGE", "STORAGE"]:
+			search_room_id = room_id
+		for node in room.find_children("*", "RoomFurniture3D", true, false):
+			var prop := node as RoomFurniture3D
+			if prop == null or not prop.searchable:
+				continue
+			searchable_total += 1
+			if prop.searched.get_connections().size() > 0:
+				wired_searchable += 1
+	if search_room_id.is_empty():
+		failures.append("远征关卡没有可搜索房，无法满足搜索玩法")
+	if searchable_total <= 0:
+		failures.append("远征关卡全场没有可搜索容器")
+	elif wired_searchable != searchable_total:
+		failures.append("可搜索容器未全部接入搜索回调：%d/%d" % [wired_searchable, searchable_total])
+
+
+func _verify_fate_on_door(tower: TowerDescent3D, failures: Array[String]) -> void:
+	# 过门命运卡：清空 01 号房、给足钥匙后开门，必须弹出命运卡三选一。
+	var from_room := tower._room_by_id.get("room_01") as DungeonRoom3D
+	if from_room == null:
+		failures.append("命运卡检查缺少 01 号房")
+		return
+	from_room.cleared = true
+	tower._room_key_count = maxi(tower._room_key_count, 3)
+	tower._current_room_id = "room_01"
+	if not tower._try_open_room_door("room_02"):
+		failures.append("01→02 门未开启（命运卡无法触发）：%s" % tower.status_label.text)
+		return
+	await get_tree().process_frame
+	await get_tree().process_frame
+	if not tower._door_fate_active:
+		failures.append("过门后没有进入命运卡选择")
+	else:
+		if tower._door_fate_choices.size() != 3:
+			failures.append("命运卡不是三选一：%d" % tower._door_fate_choices.size())
+		if tower.get_node_or_null("HUD/DoorFateOverlay3D") == null:
+			failures.append("命运卡选择界面未构建")
+		tower._cancel_door_fate_selection()
+		await get_tree().process_frame
+
+
+# —— 4) 默认塔楼回归 ——
+
+func _verify_default_tower(failures: Array[String]) -> void:
+	var packed := load(TOWER_SCENE) as PackedScene
+	if packed == null:
+		failures.append("TowerDescent3D.tscn 加载失败")
+		return
+	var tower := packed.instantiate() as TowerDescent3D
+	tower.test_mode = true
+	tower.run_seed_override = 77001199
+	add_child(tower)
+	await get_tree().process_frame
+
+	if tower.is_expedition():
+		failures.append("默认塔楼被意外标记为远征关卡")
+	if not tower.get_expedition_run_id().is_empty():
+		failures.append("默认塔楼不应携带远征关卡标识")
+	# 同一份脚本服务两种关卡：远征覆写不能反向污染塔楼的 HUD 口径。
+	var tower_area_text := str(tower.call("_hud_floor_label_text"))
+	if not tower_area_text.begins_with("高塔外层"):
+		failures.append("默认塔楼地图区域标签被改成非塔楼口径：%s" % tower_area_text)
+	# 同理：远征关掉的背景音乐开关不能跟着污染塔楼（塔楼必须继续有楼层背景音乐）。
+	var tower_atmosphere := tower._atmosphere as Node3D
+	if tower_atmosphere == null:
+		failures.append("默认塔楼缺少 TowerAtmosphere3D")
+	elif not bool(tower_atmosphere.get("background_music_enabled")):
+		failures.append("默认塔楼的 background_music_enabled 被远征口径关掉（塔楼应保持开启）")
+	var blocks := tower.get_node_or_null("Blocks") as Node3D
+	if blocks == null:
+		failures.append("默认塔楼缺少 Blocks 根节点")
+	else:
+		var names: Array[String] = []
+		for child in blocks.get_children():
+			names.append(str(child.name))
+		var expected: Array[String] = ["Rooftop", "Base", "Battle", "Stairs"]
+		if names != expected:
+			failures.append("默认塔楼区块被改写：%s（期望 %s）" % [names, expected])
+		if blocks.get_node_or_null("Expedition") != null:
+			failures.append("默认塔楼不应出现 Expedition 区块")
+	if not tower._room_by_id.has("start"):
+		failures.append("默认塔楼缺少 100F 天台(start)")
+	if not tower._room_by_id.has("facility"):
+		failures.append("默认塔楼缺少 99F 基地(facility)")
+	# 隐藏塔楼当前只发布到 98F；深层设计仍保留，但不能把未发布楼层当运行基线。
+	if tower._floor_plan_snapshots.has(6) or tower._floor_plan_snapshots.has(15):
+		failures.append("默认塔楼意外预生成了当前发布范围外的 94F/85F")
+
+	# 存档路由：远征关卡快照必须回到远征场景；空 map id 的旧塔楼快照不得被路由。
+	var resume_scene := tower.get_runtime_resume_scene_path(_expedition_snapshot)
+	if resume_scene != EXPEDITION_SCENE:
+		failures.append("主塔未把 expedition_01 战局快照路由回远征关卡：%s" % resume_scene)
+	var tower_snapshot := _expedition_snapshot.duplicate(true)
+	tower_snapshot["runtime_map_id"] = ""
+	if not tower.get_runtime_resume_scene_path(tower_snapshot).is_empty():
+		failures.append("旧塔楼战局快照被错误路由到远征关卡")
+
+	tower.queue_free()
+	await get_tree().process_frame
+	await get_tree().process_frame
+
+
+# —— 5) 退出战局离场契约 ——
+
+func _verify_expedition_exit_contract(failures: Array[String]) -> void:
+	var packed := load(EXPEDITION_SCENE) as PackedScene
+	if packed == null:
+		failures.append("退出契约检查无法加载 ExpeditionLevel01_3D.tscn")
+		return
+	var tower := packed.instantiate() as TowerDescent3D
+	tower.test_mode = true
+	tower.run_seed_override = 77001199
+	add_child(tower)
+	await get_tree().process_frame
+	await get_tree().physics_frame
+
+	var start_room := tower._room_by_id.get("start") as DungeonRoom3D
+	if start_room == null:
+		failures.append("退出契约检查缺少 start 安全房")
+		tower.queue_free()
+		return
+	var exit_door: RoomDoor3D = null
+	for side_value in start_room.door_targets.keys():
+		if str(start_room.door_targets[side_value]).is_empty():
+			exit_door = start_room.get_door_node(str(side_value)) as RoomDoor3D
+			break
+	if exit_door == null:
+		failures.append("退出契约检查找不到无目标抵达侧门")
+		tower.queue_free()
+		return
+	tower.player.global_position = exit_door.global_position + Vector3(0.0, 0.05, 0.0)
+	await get_tree().physics_frame
+	var candidate := tower.get_interaction_candidate(tower.player)
+	if str(candidate.get("mode", "")) != "configured_expedition_retreat":
+		failures.append("退出战局门未产生 expedition_retreat 交互候选：%s" % candidate)
+	if not tower.perform_interaction(tower.player, candidate):
+		failures.append("退出战局门按 E 未打开确认")
+		tower.queue_free()
+		return
+	await get_tree().process_frame
+	var overlay := tower.get_node_or_null("HUD/ExpeditionExitWarning") as Control
+	if overlay == null:
+		failures.append("退出战局未打开专属确认弹窗")
+		tower.queue_free()
+		return
+	if tower.get_node_or_null("HUD/InitialLoopRetreatWarning") != null:
+		failures.append("远征关卡退出误用了塔楼反向撤退弹窗")
+	var rooms_before := tower._room_by_id.size()
+	if tower._inventory != null:
+		tower._inventory.add_item({"id": "verify_expedition_loot", "name": "验收物资", "count": 1})
+	var confirm := _find_button(overlay, "确认退出")
+	if confirm == null:
+		failures.append("远征退出弹窗缺少确认按钮")
+	else:
+		confirm.pressed.emit()
+		await get_tree().process_frame
+	if not tower._completed:
+		failures.append("确认退出后远征行动未标记结束")
+	if str(tower.return_scene_path) != GameDesignConfig.MAIN_SCENE:
+		failures.append("远征退出落点不是塔楼 99F 基地：%s" % tower.return_scene_path)
+	if tower._room_by_id.size() != rooms_before:
+		failures.append("确认退出后房间表被重建：%d -> %d，应为离场而非场景内复位" % [
+			rooms_before, tower._room_by_id.size(),
+		])
+	if not tower._room_by_id.has("start"):
+		failures.append("确认退出后 start 安全屋消失")
+	if tower._room_by_id.has("floor_01_entry"):
+		failures.append("确认退出后出现塔楼 98F 房间 floor_01_entry")
+	if tower._room_by_id.has("facility"):
+		failures.append("确认退出后出现不应存在的 99F 基地房")
+	if tower._inventory != null and tower._inventory.get_occupied_slots().size() != 0:
+		failures.append("确认退出后背包未被清空")
+	var weapons_after := 0
+	for slot_index in range(2):
+		if not tower.player.get_equipped_weapon_item_for_slot(slot_index).is_empty():
+			weapons_after += 1
+	if weapons_after != 0:
+		failures.append("确认退出后装备武器未被清空：%d 把" % weapons_after)
+	var pending := GameEntryFlow.peek_pending_entry()
+	if str(pending.get("reason", "")) != GameEntryFlow.REASON_ABORT_RETURN_99F:
+		failures.append("确认退出未登记返回基地契约：%s" % pending)
+	if str(pending.get("spawn_target", "")) != GameEntryFlow.SPAWN_BASE_99F:
+		failures.append("确认退出的返回契约不是 99F 基地出生：%s" % pending)
+	if int(pending.get("request_id", -1)) > 0:
+		GameEntryFlow.cancel_request(int(pending["request_id"]))
+	tower.queue_free()
+	await get_tree().process_frame
+	await get_tree().process_frame
+
+
+# —— 工具 ——
+
+## 尺寸是否落在 8 个房型模板的尺寸集合里。显式端口拼装允许任意模板整体旋转
+## 90°/270°，所以非正方形模板的宽深转置也是同一个模板的合法占位。
+func _is_template_size(dimensions: Vector2) -> bool:
+	for candidate in PLAN_TEMPLATE_SIZES:
+		if (
+			dimensions.is_equal_approx(candidate)
+			or dimensions.is_equal_approx(Vector2(candidate.y, candidate.x))
+		):
+			return true
+	return false
+
+
+func _script_constants(node: Node) -> Dictionary:
+	var script := node.get_script() as Script
+	if script == null:
+		return {}
+	return script.get_script_constant_map()
+
+
+## 读 `res://` 文本资源（远征关卡场景的「不继承塔楼」是文件级契约，
+## 只有读原文才能在没有加载塔楼场景的前提下断言）。
+func _read_text(res_path: String) -> String:
+	var file := FileAccess.open(res_path, FileAccess.READ)
+	if file == null:
+		return ""
+	var text := file.get_as_text()
+	file.close()
+	return text
+
+
+func _find_button(root: Node, text_fragment: String) -> Button:
+	if root == null:
+		return null
+	for child in root.find_children("*", "Button", true, false):
+		var button := child as Button
+		if button != null and button.text.contains(text_fragment):
+			return button
+	return null
+
+
+func _report(failures: Array[String]) -> void:
+	if failures.is_empty():
+		print(
+			"EXPEDITION_LEVEL01_FLOW_OK: "
+			+ "catalog->menu->loading->expedition, single layer, Blocks/Expedition only "
+			+ "(scene is structurally independent of TowerDescent3D.tscn), "
+			+ "13 rooms (entry + room_01..10 + boss + extraction, "
+			+ "constrained per-seed room types), 15x15 v007 safe room with 2 perpendicular doors, "
+			+ "enemy spawn, searchable containers, door fate 3-choice, free entry gate, "
+			+ "STANDARD extraction beacon, abort-return-to-base contract, default tower unchanged"
+		)
+		get_tree().quit(0)
+		return
+	for failure in failures:
+		push_error(failure)
+	get_tree().quit(1)

@@ -1,0 +1,125 @@
+{
+  "narrative_id": "nar_tower_opening_01_wake",
+  "schema_version": 1,
+  "priority": 10,
+  "trigger": {
+    "kind": "event",
+    "on": "gameplay_started",
+    "filter": {
+      "room_id": "floor_01_exit"
+    },
+    "once": "run"
+  },
+  "duration": 18.0,
+  "cues": [
+    {
+      "at": 0.0,
+      "do": "player.lock_input",
+      "locked": true
+    },
+    {
+      "at": 0.0,
+      "do": "scene.spawn_item",
+      "item_id": "weapon_starter_rifle",
+      "spawn_key": "nar_tower_opening_01_wake:starter_weapon",
+      "auto_equip": true,
+      "count": 1,
+      "point_room": "floor_01_exit",
+      "point_offset": [
+        5.3,
+        0.05,
+        -0.7
+      ],
+      "spread": false
+    },
+    {
+      "at": 0.0,
+      "do": "actor.pose",
+      "clip": "dead",
+      "phase": 1.0,
+      "frozen": true
+    },
+    {
+      "at": 0.1,
+      "do": "camera.focus",
+      "distance": 6.0,
+      "elevation_deg": 34.0,
+      "duration": 6.0
+    },
+    {
+      "at": 7.0,
+      "do": "actor.pose",
+      "clip": "dead",
+      "phase": 1.0,
+      "to_phase": 0.0,
+      "duration": 1.5
+    },
+    {
+      "at": 9.0,
+      "do": "actor.face",
+      "yaw_deg": 32.0,
+      "relative": true,
+      "duration": 0.45
+    },
+    {
+      "at": 9.6,
+      "do": "actor.face",
+      "yaw_deg": -32.0,
+      "relative": true,
+      "duration": 0.6
+    },
+    {
+      "at": 10.3,
+      "do": "actor.face",
+      "yaw_deg": 32.0,
+      "relative": true,
+      "duration": 0.6
+    },
+    {
+      "at": 11.0,
+      "do": "actor.face",
+      "yaw_deg": -32.0,
+      "relative": true,
+      "duration": 0.6
+    },
+    {
+      "at": 11.7,
+      "do": "actor.face",
+      "yaw_deg": 0.0,
+      "relative": true,
+      "duration": 0.45
+    },
+    {
+      "at": 12.0,
+      "do": "actor.say",
+      "text": "人呢",
+      "hold": 1.6
+    },
+    {
+      "at": 13.8,
+      "do": "camera.restore",
+      "duration": 0.9
+    },
+    {
+      "at": 14.4,
+      "do": "actor.face",
+      "to_point_room": "floor_01_exit",
+      "to_point_offset": [
+        5.3,
+        0.05,
+        -0.7
+      ],
+      "duration": 0.6
+    },
+    {
+      "at": 15.2,
+      "do": "actor.say",
+      "text": "那是主人留下的礼物……",
+      "hold": 2.4
+    },
+    {
+      "at": 18.0,
+      "do": "flow.end"
+    }
+  ]
+}

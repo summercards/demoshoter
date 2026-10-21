@@ -1,0 +1,197 @@
+extends Node
+
+
+func _ready() -> void:
+	process_mode = Node.PROCESS_MODE_ALWAYS
+	var failures: Array[String] = []
+	var main_scene_path := str(ProjectSettings.get_setting("application/run/main_scene", ""))
+	if main_scene_path != "res://scenes/TowerDescent3D.tscn":
+		failures.append("Project entry is not the v0.1 tower-descent scene")
+
+	var base_scene := load("res://scenes/BaseWorld3D.tscn") as PackedScene
+	if base_scene == null:
+		failures.append("BaseWorld3D scene does not load")
+		_finish(failures, 0)
+		return
+
+	LevelSelect.return_entrance_id = "spore_depths_gate"
+	var base_world := base_scene.instantiate() as BaseWorld3D
+	add_child(base_world)
+	await get_tree().process_frame
+	await get_tree().physics_frame
+	await get_tree().process_frame
+
+	var node_count := _count_nodes(base_world)
+	# Bunny01 v002 adds evaluated left/right hands, two ear sockets and independent feet.
+	# 自动贩卖机独立货窗、屏幕与碰撞加入后实测420节点，保留5节点余量。
+	# 共用暂停层新增画面设置页（9个效果开关、6档AA）与0键性能面板后，
+	# 新增恢复舱与角色衣柜后，正式基地静态节点实测483，保留17节点余量。
+	if node_count > 500:
+		failures.append("BaseWorld3D first slice is unexpectedly heavy: %d nodes" % node_count)
+	if base_world.get_facility_count() != 8:
+		failures.append("BaseWorld3D physical facility count: expected 8, actual %d" % base_world.get_facility_count())
+	for facility_node in base_world.get_node("Facilities").get_children():
+		var facility := facility_node as BaseFacility3D
+		if facility == null:
+			continue
+		var size_snapshot := facility.get_size_contract_snapshot()
+		var expected_scale := Vector3.ONE * facility.base_size_multiplier
+		var body_scale := size_snapshot.get("body_scale", Vector3.ZERO) as Vector3
+		var visual_scale := size_snapshot.get("visual_scale", Vector3.ZERO) as Vector3
+		if not body_scale.is_equal_approx(expected_scale):
+			failures.append("BaseWorld3D facility body does not match its declared size multiplier: %s" % facility.facility_id)
+		if not visual_scale.is_equal_approx(expected_scale):
+			failures.append("BaseWorld3D facility visual does not match its declared size multiplier: %s" % facility.facility_id)
+	if base_world.get_dungeon_entrance_count() != 4:
+		failures.append("BaseWorld3D does not expose four roadside dungeon entrances")
+	if base_world.player == null or base_world.player.combat_enabled:
+		failures.append("BaseWorld3D player is missing or can shoot inside the hub")
+	if base_world.player.camera.get_parent() != base_world.player or not base_world.player.camera.current:
+		failures.append("3D camera does not follow the CharacterBody3D player")
+
+	var environment_snapshot := base_world.get_environment_snapshot()
+	if not bool(environment_snapshot.get("is_3d", false)):
+		failures.append("Base world environment is not a 3D kit")
+	if int(environment_snapshot.get("module_count", 0)) < 70:
+		failures.append("BaseWorld3D environment kit has too few modular pieces")
+	if int(environment_snapshot.get("ruin_count", 0)) < 6:
+		failures.append("BaseWorld3D wilderness lacks ruin silhouettes")
+	if int(environment_snapshot.get("barrier_count", 0)) < 4:
+		failures.append("BaseWorld3D wilderness lacks roadside barriers")
+	if int(environment_snapshot.get("light_count", 0)) < 8:
+		failures.append("BaseWorld3D lacks sparse navigation lights")
+
+	var player_snapshot := base_world.player.get_state_machine_snapshot()
+	if int(player_snapshot.get("states", []).size()) != 8:
+		failures.append("Player3D state machine does not expose eight top-level states")
+	if not bool(player_snapshot.get("rules_enabled", false)):
+		failures.append("Player3D state machine does not use explicit transition rules")
+	var avatar_snapshot := base_world.player.avatar.get_component_snapshot()
+	if int(avatar_snapshot.get("component_count", 0)) != 4:
+		failures.append("Player3D avatar does not preserve four modular visual components")
+	if int(avatar_snapshot.get("visible_hand_count", 0)) != 2 or not bool(avatar_snapshot.get("has_weapon_socket", false)):
+		failures.append("Player3D avatar does not preserve the two-hand/weapon-socket contract")
+
+	var return_gate := base_world.get_node_or_null("DungeonEntrances/Dungeon03") as DungeonEntrance3D
+	if return_gate == null or base_world.player.global_position.distance_to(return_gate.global_position + Vector3(0, 0, 2.8)) > 0.05:
+		failures.append("Returning from a dungeon does not restore Player3D outside its entrance")
+	if not LevelSelect.return_entrance_id.is_empty():
+		failures.append("Dungeon return entrance state is not consumed")
+
+	var entrance_ids: Dictionary = {}
+	for entrance in get_tree().get_nodes_in_group("dungeon_entrance"):
+		if not entrance is DungeonEntrance3D or not base_world.is_ancestor_of(entrance):
+			continue
+		if entrance_ids.has(entrance.entrance_id):
+			failures.append("Two 3D dungeon entrances share id %s" % entrance.entrance_id)
+		entrance_ids[entrance.entrance_id] = true
+		if not ResourceLoader.exists(entrance.target_scene_path, "PackedScene"):
+			failures.append("3D dungeon entrance points to missing scene: %s" % entrance.target_scene_path)
+
+	var training_range := base_world.get_node_or_null("Facilities/TrainingRange") as BaseFacility3D
+	if training_range == null or training_range.activation_type != BaseFacility3D.ActivationType.LOAD_SCENE or training_range.target_scene_path != "res://scenes/TrainingRange3D.tscn":
+		failures.append("3D training facility does not point to the independent 3D training scene")
+	if base_world.get_node_or_null("Facilities/BaseConsole") != null:
+		failures.append("3D base management terminal was not removed")
+	if base_world.get_node_or_null("Facilities/Divination") != null:
+		failures.append("3D fate divination facility was not removed")
+	var pause_overlay := base_world.get_node_or_null("HUD/PauseOverlay") as PauseMenu3D
+	if pause_overlay == null:
+		failures.append("BaseWorld3D has no reusable visible pause overlay")
+	else:
+		await _tap_action("pause")
+		if not get_tree().paused or not pause_overlay.is_pause_open():
+			failures.append("BaseWorld3D Esc does not open a visible real pause")
+		await _tap_action("pause")
+		if get_tree().paused or pause_overlay.is_pause_open():
+			failures.append("BaseWorld3D second Esc does not resume")
+
+	# 八态动态契约：地面动作、下落、落地与死亡都由同一个 StateMachine 驱动表现。
+	# 正式初始武器已改为初始步枪（bp_starter_rifle，longgun 族）；本段验证的是手枪单手跑步握持，必须显式装配手枪。
+	if not base_world.player.equip_weapon("bp_pistol", "mod_bullet_standard"):
+		failures.append("Could not equip pistol for the BaseWorld sidearm run-grip verification")
+	await get_tree().process_frame
+	base_world.player.set_test_move_direction(Vector3.RIGHT)
+	await get_tree().physics_frame
+	await get_tree().process_frame
+	if base_world.player.get_state_machine_state() != "moving":
+		failures.append("Player3D does not enter moving from 3D input")
+	var moving_before := base_world.player.avatar.get_component_snapshot()
+	await get_tree().create_timer(0.14).timeout
+	var moving_after := base_world.player.avatar.get_component_snapshot()
+	if (
+		not bool(moving_after.get("moving_animation_active", false))
+		or is_equal_approx(float(moving_before.get("locomotion_cycle", 0.0)), float(moving_after.get("locomotion_cycle", 0.0)))
+		or str(moving_after.get("authored_motion_clip", "")).is_empty()
+	):
+		failures.append("Player3D moving state has no independent locomotion animation cycle")
+	if (
+		str(moving_after.get("weapon_pose_state", "")) != "sidearm_run"
+		or int(moving_after.get("active_grip_hand_count", 0)) != 1
+		or float(moving_after.get("hand_r_to_socket_global_distance", 999.0)) > 0.207
+	):
+		failures.append("Locomotion animation breaks the pistol's independent right-hand run grip")
+	base_world.player.request_dash()
+	await get_tree().process_frame
+	await get_tree().process_frame
+	if base_world.player.get_state_machine_state() != "dashing" or not base_world.player.avatar.get_component_snapshot().get("dash_dust_emitting", false):
+		failures.append("Player3D dash state does not drive the 3D dust burst")
+	await get_tree().create_timer(0.24).timeout
+	base_world.player.set_test_move_direction(Vector3.ZERO)
+	await get_tree().physics_frame
+	await get_tree().process_frame
+	if base_world.player.get_state_machine_state() != "idle":
+		failures.append("Player3D does not return to idle after locomotion")
+	base_world.player.set_input_locked(true)
+	await get_tree().process_frame
+	if base_world.player.get_state_machine_state() != "locked" or not base_world.player.avatar.get_component_snapshot().get("lock_ring_visible", false):
+		failures.append("Player3D locked state does not drive the amber ring")
+	base_world.player.set_input_locked(false)
+	await get_tree().physics_frame
+	await get_tree().create_timer(0.28).timeout
+	base_world.player.take_damage(12)
+	await get_tree().process_frame
+	if base_world.player.get_state_machine_state() != "hurt":
+		failures.append("Player3D damage does not enter hurt state")
+	await get_tree().create_timer(0.30).timeout
+	base_world.player.take_damage(999)
+	await get_tree().process_frame
+	if base_world.player.get_state_machine_state() != "dead":
+		failures.append("Player3D lethal damage does not enter dead state")
+	var machine := base_world.player.get("_state_machine") as StateMachine
+	if machine.can_transition_to("idle") or machine.transition_to("idle"):
+		failures.append("Player3D dead terminal state accepts an illegal transition")
+
+	base_world.queue_free()
+	await get_tree().process_frame
+	_finish(failures, node_count)
+
+
+func _count_nodes(root: Node) -> int:
+	var count := 1
+	for child in root.get_children():
+		count += _count_nodes(child)
+	return count
+
+
+func _tap_action(action: StringName) -> void:
+	var pressed := InputEventAction.new()
+	pressed.action = action
+	pressed.pressed = true
+	Input.parse_input_event(pressed)
+	await get_tree().process_frame
+	var released := InputEventAction.new()
+	released.action = action
+	released.pressed = false
+	Input.parse_input_event(released)
+	await get_tree().process_frame
+
+
+func _finish(failures: Array[String], node_count: int) -> void:
+	if failures.is_empty():
+		print("BASE_WORLD_3D_FLOW_OK: formal 3D hub, modular environment, four-component player, eight-state contract, facilities, gates, and return flow pass (nodes=%d)" % node_count)
+		get_tree().quit(0)
+		return
+	for failure in failures:
+		push_error(failure)
+	get_tree().quit(1)

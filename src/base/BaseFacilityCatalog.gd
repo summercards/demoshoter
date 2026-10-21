@@ -1,0 +1,132 @@
+class_name BaseFacilityCatalog
+extends RefCounted
+## 正式基地设施的唯一静态目录。场景和菜单只保存 facility_id。
+
+const ACTION_INFO := "info"
+const ACTION_MENU := "menu"
+const ACTION_SCENE := "scene"
+
+const DEFINITIONS: Array[Dictionary] = [
+	{
+		"facility_id": "mission_operations",
+		"display_name": "远征情报室",
+		"description": "查看野外道路情报；独立副本从基地外入口进入",
+		"action_kind": ACTION_MENU,
+		"action_path": "res://scenes/RogueMapSelectMenu.tscn",
+		"legacy_building_type": -1,
+		"level_property": "",
+		"color": Color(0.88, 0.48, 0.18),
+	},
+	# 2026-10-16：靶场入口已从基地设施牌移到 Esc 暂停菜单，基地地面不再放这块牌子。
+	# 条目本身保留 —— 它仍是 action_path 与可用性快照的唯一真源，
+	# 要恢复地面入口只需在 BaseWorld3D.tscn 的 Facilities 下贴回 TrainingRange 节点。
+	{
+		"facility_id": "training_range",
+		"display_name": "地下训练靶场",
+		"description": "隔离测试枪身、弹药与组合；离场不保留配置",
+		"action_kind": ACTION_SCENE,
+		"action_path": "res://scenes/TrainingRange3D.tscn",
+		"legacy_building_type": -1,
+		"level_property": "",
+		"color": Color(0.28, 0.76, 0.70),
+	},
+	{
+		"facility_id": "weapon_workshop",
+		"display_name": "枪械工坊",
+		"description": "解锁枪身、弹药与配件蓝图",
+		"action_kind": ACTION_MENU,
+		"action_path": "res://scenes/WorkshopMenu.tscn",
+		"legacy_building_type": 0,
+		"level_property": "workshop_level",
+		"color": Color(0.75, 0.42, 0.16),
+	},
+	{
+		"facility_id": "weapon_forge",
+		"display_name": "武器改造台",
+		"description": "把武器与任意物品投进炼炉；钥匙齐了能定向合成，否则重掷品质与弹种",
+		"action_kind": ACTION_MENU,
+		"action_path": "res://scenes/WorkbenchMenu.tscn",
+		# 改造台没有建筑等级：它的能力由「持有什么材料」决定，不由 level 决定。
+		"legacy_building_type": -1,
+		"level_property": "",
+		"color": Color(0.62, 0.42, 0.90),
+	},
+	{
+		"facility_id": "vault",
+		"display_name": "保险柜",
+		"description": "管理撤离物资与下局带入",
+		"action_kind": ACTION_MENU,
+		"action_path": "res://scenes/VaultMenu.tscn",
+		"legacy_building_type": 4,
+		"level_property": "vault_level",
+		"color": Color(0.24, 0.58, 0.72),
+	},
+	{
+		"facility_id": "monster_archive",
+		"display_name": "怪物档案室",
+		"description": "查看成长中的精英与悬赏情报",
+		"action_kind": ACTION_MENU,
+		"action_path": "res://scenes/MonsterArchiveMenu.tscn",
+		"legacy_building_type": 6,
+		"level_property": "archive_level",
+		"color": Color(0.48, 0.65, 0.26),
+	},
+	{
+		"facility_id": "fate_collection",
+		"display_name": "命运卡收藏室",
+		"description": "浏览已发现的命运卡片与正逆位",
+		"action_kind": ACTION_MENU,
+		"action_path": "res://scenes/FateCardCollectionMenu.tscn",
+		"legacy_building_type": -1,
+		"level_property": "",
+		"color": Color(0.72, 0.28, 0.58),
+	},
+	{
+		"facility_id": "base_vending",
+		"display_name": "自动贩卖机",
+		"description": "购买基础枪械、初级背包与药水；出售保险柜物品",
+		"action_kind": ACTION_MENU,
+		"action_path": "res://scenes/BaseVendingMenu.tscn",
+		"legacy_building_type": -1,
+		"level_property": "",
+		"color": Color(0.16, 0.78, 0.88),
+	},
+	{
+		"facility_id": "base_recovery",
+		"display_name": "状态恢复舱",
+		"description": "消耗基地电量恢复生命与手电电量",
+		"action_kind": ACTION_MENU,
+		"action_path": "res://scenes/BaseRecoveryMenu.tscn",
+		"legacy_building_type": -1,
+		"level_property": "",
+		"color": Color(0.22, 0.86, 0.62),
+	},
+	{
+		"facility_id": "avatar_wardrobe",
+		"display_name": "角色衣柜",
+		"description": "更换身体、头部、手部、脚部、帽子与眼镜外观",
+		"action_kind": ACTION_MENU,
+		"action_path": "res://scenes/ui/WardrobeMenu3D.tscn",
+		"legacy_building_type": -1,
+		"level_property": "",
+		"color": Color(0.14, 0.68, 0.82),
+	},
+]
+
+
+static func all_definitions() -> Array[Dictionary]:
+	var result: Array[Dictionary] = []
+	for definition in DEFINITIONS:
+		result.append(definition.duplicate(true))
+	return result
+
+
+static func get_definition(facility_id: String) -> Dictionary:
+	for definition in DEFINITIONS:
+		if str(definition.get("facility_id", "")) == facility_id:
+			return definition.duplicate(true)
+	return {}
+
+
+static func has_facility(facility_id: String) -> bool:
+	return not get_definition(facility_id).is_empty()

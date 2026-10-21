@@ -1,0 +1,65 @@
+class_name NarrativeCatalog
+extends RefCounted
+## 剧本目录：稳定 `narrative_id` → 剧本文件路径的**唯一真源**。
+##
+## 与 MusicCatalog / EliteContentCatalog / BossContentCatalog / BarkCatalog 同规格，是本工程
+## 既有的「内容目录」写法：代码只持有 id → 路径，剧本本体在 data/narrative/*.json。
+## 逻辑侧只认 narrative_id，不出现任何剧本内容字面量。
+##
+## 为什么剧本不写进 .gd：时间轴是**嵌套有序**结构（每条 cue 的参数各异），写成 GDScript
+## 字面量既难读也无法被校验器逐值比对。项目已有 JSON 内容先例（关卡布局清单、
+## asset_manifest.json）。规则见 docs/v0.1/08_技术施工_剧情触发.md §3.2。
+
+const ROOT := "res://data/narrative/"
+
+## id → 相对 res:// 的剧本路径。新增剧本必须同时登记在本表，
+## 否则 `has_id()` 为假、加载器直接拒绝（不静默兜底）。
+const ENTRIES := {
+	# 开场第一段：新游戏在 98F 主人的办公室（区块00 最深房间）醒来。
+	"nar_tower_opening_01_wake": ROOT + "nar_tower_opening_01_wake.json",
+	# 开场第二段：走进会议室（区块00 的下一间）时触发。
+	"nar_tower_opening_02_zombies": ROOT + "nar_tower_opening_02_zombies.json",
+	# 开场 2.5 段：经过 99F 基地东门外、靠近东门时触发。
+	# 只做一件事：把基地的灯**提前关掉**。99F 基地默认是点亮的，若不提前关，
+	# 玩家会在剧本03 起播那一刻看到「基地先亮 → 突然变暗」的割裂感。
+	"nar_tower_opening_02_5_stairwell_blackout": ROOT + "nar_tower_opening_02_5_stairwell_blackout.json",
+	# 开场第三段：从 98F 门厅东门上行、走进 99F 归航基地（facility）东门内侧时触发。
+	# 基地起始为关灯状态，演出把镜头转向东墙灯开关并提示玩家开灯。
+	"nar_tower_opening_03_base_dark": ROOT + "nar_tower_opening_03_base_dark.json",
+	"nar_tower_opening_02_lobby": ROOT + "nar_tower_opening_02_lobby.json",
+	"nar_tower_opening_02_1_find_owner": ROOT + "nar_tower_opening_02_1_find_owner.json",
+	"nar_tower_opening_02_2_outside_boom": ROOT + "nar_tower_opening_02_2_outside_boom.json",
+	# 开场 2.3 段：从 98F 楼梯上到 99F、由楼梯平台跨进基地东门外走廊时触发。
+	# 与 2.2 同款「再一次轰声 + 震屏」，随后角色惊呼「啊！」。**同刻互斥的关键一条**：
+	# 2.3 是纯氛围段（priority=-10），必须让位给 2.5 的关灯（priority=0）——否则玩家
+	# 连跑时 2.3 还在播、2.5 被丢弃，基地灯不灭，「先亮后暗」的老缺陷会复现。
+	"nar_tower_opening_02_3_aftershock": ROOT + "nar_tower_opening_02_3_aftershock.json",
+	"nar_tower_opening_04_stair_zombies": ROOT + "nar_tower_opening_04_stair_zombies.json",
+	"nar_tower_opening_05_rooftop_crowd": ROOT + "nar_tower_opening_05_rooftop_crowd.json",
+	"nar_tower_opening_05_bridge_fat": ROOT + "nar_tower_opening_05_bridge_fat.json",
+}
+
+
+static func has_id(narrative_id: String) -> bool:
+	return ENTRIES.has(narrative_id)
+
+
+static func path_for(narrative_id: String) -> String:
+	return str(ENTRIES.get(narrative_id, ""))
+
+
+## 供导演在启动时把**所有**数据驱动触发源登记进注册表。
+static func all_ids() -> Array:
+	var ids: Array = ENTRIES.keys()
+	ids.sort()
+	return ids
+
+
+## 自检：登记的每条路径都必须真实存在。校验器与验收用，运行时不用。
+static func missing_files() -> Array:
+	var missing: Array = []
+	for narrative_id: String in ENTRIES:
+		var path := str(ENTRIES[narrative_id])
+		if not FileAccess.file_exists(path):
+			missing.append("%s -> %s" % [narrative_id, path])
+	return missing

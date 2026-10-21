@@ -1,0 +1,329 @@
+class_name RoomDoor3D
+extends StaticBody3D
+## 一条地图边在房间侧的实体门。地图边状态由 Dungeon3D 统一管理，门只负责表现、阻挡和提示。
+
+const TOWER_GEOMETRY := preload("res://src/world3d/TowerGeometry3D.gd")
+const PANEL_THICKNESS_M := 0.18
+const COLLISION_DEPTH_M := 0.42
+const OPEN_LIFT_CLEARANCE_M := 0.32
+const DEFAULT_MOTION_DURATION_S := 0.24
+
+## 门扇动画结束（开到位或关到底）。门不是 Area3D，交互靠距离判定，
+## 因此"门关上了"这个事实只能从这里发出，供上层订阅。
+signal motion_finished(is_open: bool)
+
+var direction := "east"
+var target_room_id := ""
+var is_open := false
+var requires_key := true
+var requires_clear := true
+var triggers_fate := true
+var _panel: Node3D
+var _collision: CollisionShape3D
+var _prompt: Label3D
+var _panel_visual_scene: PackedScene
+var _motion_duration_s := DEFAULT_MOTION_DURATION_S
+var _collision_tracks_panel_motion := false
+var _manual_close_enabled := false
+var _prompt_override := ""
+var _motion_tween: Tween
+var _transitioning := false
+var _target_open := false
+var _presentation_clear_height_m := TOWER_GEOMETRY.DOOR_CLEAR_HEIGHT_M
+
+## Geometry-only adaptation; access policy and motion state stay owned by the map edge.
+func set_presentation_opening(width_m: float, height_m: float) -> void:
+	_presentation_clear_height_m = height_m
+	if _collision != null and _collision.shape is BoxShape3D:
+		var shape := (_collision.shape as BoxShape3D).duplicate() as BoxShape3D
+		shape.size = Vector3(width_m, height_m, COLLISION_DEPTH_M)
+		_collision.shape = shape
+		_collision.position.y = height_m * 0.5
+	set_open(is_open, true)
+
+
+func configure(
+	p_direction: String,
+	p_target_room_id: String,
+	accent: Color,
+	p_panel_visual_scene: PackedScene = null
+) -> void:
+	direction = p_direction
+	target_room_id = p_target_room_id
+	_panel_visual_scene = p_panel_visual_scene
+	_build(accent)
+
+
+func set_access_policy(policy: Dictionary) -> void:
+	requires_key = bool(policy.get("requires_key", true))
+	requires_clear = bool(policy.get("requires_clear", true))
+	triggers_fate = bool(policy.get("triggers_fate", true))
+	_refresh_prompt()
+
+
+func set_motion_profile(duration_s: float, collision_tracks_panel := false) -> void:
+	_motion_duration_s = clampf(duration_s, 0.05, 2.0)
+	_collision_tracks_panel_motion = collision_tracks_panel
+	if _collision == null or _panel == null:
+		return
+	# CollisionShape3D必须保持为StaticBody3D的直接子节点才会参与物理。
+	# 同步模式通过并行动画保持其Y与门板一致，而不是把碰撞挂到视觉节点下。
+	if _collision_tracks_panel_motion:
+		_collision.position.y = _panel.position.y
+
+
+func set_manual_close_enabled(enabled: bool) -> void:
+	_manual_close_enabled = enabled
+	_refresh_prompt()
+
+
+func set_prompt_override(text: String) -> void:
+	_prompt_override = text
+	_refresh_prompt()
+
+
+func is_in_motion() -> bool:
+	return _transitioning
+
+
+func set_open(opened: bool, immediate := false) -> void:
+	if _transitioning and _target_open == opened and not immediate:
+		return
+	var changed := is_open != opened or (_transitioning and _target_open != opened)
+	is_open = opened
+	_target_open = opened
+	if _panel == null:
+		if _collision != null:
+			_collision.set_deferred("disabled", opened)
+		_transitioning = false
+		_refresh_prompt()
+		return
+	var closed_y := _presentation_clear_height_m * 0.5
+	var open_y := _presentation_clear_height_m * 1.5 + OPEN_LIFT_CLEARANCE_M
+	var target_y := (
+		open_y
+		if opened
+		else closed_y
+	)
+	if _motion_tween != null and _motion_tween.is_valid():
+		_motion_tween.kill()
+	if immediate or not is_inside_tree() or not changed:
+		_transitioning = false
+		_panel.position.y = target_y
+		if _collision != null:
+			if _collision_tracks_panel_motion:
+				_collision.position.y = target_y
+			_collision.set_deferred("disabled", opened)
+		_refresh_prompt()
+		return
+	_transitioning = true
+	# 专用升降门的碰撞与门板同步运动；普通房门继续保持旧的即时放行合同，
+	# 避免改变既有战斗门节奏。
+	if _collision != null:
+		_collision.set_deferred(
+			"disabled",
+			false if _collision_tracks_panel_motion else opened
+		)
+	var full_travel := maxf(0.001, open_y - closed_y)
+	var travel_ratio := clampf(absf(target_y - _panel.position.y) / full_travel, 0.05, 1.0)
+	_motion_tween = create_tween()
+	_motion_tween.set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_IN_OUT)
+	_motion_tween.set_parallel(_collision_tracks_panel_motion and _collision != null)
+	_motion_tween.tween_property(
+		_panel,
+		"position:y",
+		target_y,
+		_motion_duration_s * travel_ratio
+	)
+	if _collision_tracks_panel_motion and _collision != null:
+		_motion_tween.tween_property(
+			_collision,
+			"position:y",
+			target_y,
+			_motion_duration_s * travel_ratio
+		)
+	_motion_tween.finished.connect(_on_motion_finished.bind(opened, target_y))
+	_refresh_prompt()
+	if opened and AudioManager != null:
+		AudioManager.play_sfx("door_open", -3.0)
+
+
+func _on_motion_finished(opened: bool, target_y: float) -> void:
+	if _target_open != opened:
+		return
+	_transitioning = false
+	motion_finished.emit(opened)
+	if _panel != null:
+		_panel.position.y = target_y
+	if _collision != null:
+		if _collision_tracks_panel_motion:
+			_collision.position.y = target_y
+		_collision.set_deferred("disabled", opened)
+	_refresh_prompt()
+
+
+## 文字提示牌退役为纯文案载体（`_prompt.text` 仍被候选协议与多枚探针读取）。
+## 可见反馈统一交给 PlayerInteractionController3D 的常驻圆点，圆点锚点取本牌位置。
+func set_prompt_visible(_show_prompt: bool) -> void:
+	pass
+
+
+## 常驻圆点锚点：沿用原提示牌的位置。
+func get_interaction_dot_anchor() -> Vector3:
+	if _prompt != null and is_instance_valid(_prompt):
+		return _prompt.global_position
+	return global_position + Vector3.UP * (TOWER_GEOMETRY.DOOR_CLEAR_HEIGHT_M + 0.62)
+
+
+## 已开启且不允许手动关闭的门不再可交互 —— 圆点随之淡出，玩家一眼能看出哪扇门还能开。
+func is_interaction_dot_visible() -> bool:
+	if _transitioning:
+		return true
+	return not is_open or _manual_close_enabled
+
+
+
+func get_interaction_prompt_text() -> String:
+	return _prompt.text if _prompt != null else "[E] 开启通道"
+
+
+func get_snapshot() -> Dictionary:
+	return {
+		"direction": direction,
+		"target_room_id": target_room_id,
+		"is_open": is_open,
+		"requires_key": requires_key,
+		"requires_clear": requires_clear,
+		"triggers_fate": triggers_fate,
+		"blocks_passage": _collision != null and not _collision.disabled,
+		"transitioning": _transitioning,
+		"target_open": _target_open,
+		"motion_duration_s": _motion_duration_s,
+		"collision_tracks_panel_motion": _collision_tracks_panel_motion,
+		"collision_is_direct_body_child": _collision != null and _collision.get_parent() == self,
+		"panel_y": _panel.position.y if _panel != null else 0.0,
+		"collision_y": _collision.position.y if _collision != null else 0.0,
+		"clear_width_m": TOWER_GEOMETRY.DOOR_CLEAR_WIDTH_M,
+		"clear_height_m": TOWER_GEOMETRY.DOOR_CLEAR_HEIGHT_M,
+		"panel_size": Vector3(
+			TOWER_GEOMETRY.DOOR_CLEAR_WIDTH_M,
+			TOWER_GEOMETRY.DOOR_CLEAR_HEIGHT_M,
+			PANEL_THICKNESS_M
+		),
+		"visual_asset_id": str(get_meta("visual_asset_id", "")),
+		"is_3d": true,
+	}
+
+
+func _refresh_prompt() -> void:
+	if _prompt == null:
+		return
+	if not _prompt_override.is_empty() and not _transitioning and not is_open:
+		_prompt.text = _prompt_override
+		_prompt.modulate = Color(1.0, 0.42, 0.28)
+		return
+	if _transitioning:
+		_prompt.text = "通道开启中…" if _target_open else "通道关闭中…"
+		_prompt.modulate = Color(0.52, 0.88, 1.0)
+	elif is_open and _manual_close_enabled:
+		_prompt.text = "[E] 关闭通道"
+		_prompt.modulate = Color(0.52, 0.88, 1.0)
+	elif is_open:
+		_prompt.text = "通道已开启"
+		_prompt.modulate = Color(0.42, 0.92, 0.68)
+	elif requires_key:
+		_prompt.text = "[E] 使用房间钥匙"
+		_prompt.modulate = Color(1.0, 0.72, 0.22)
+	elif triggers_fate:
+		_prompt.text = "[E] 开启入口 · 选择命运"
+		_prompt.modulate = Color(0.44, 0.88, 1.0)
+	else:
+		_prompt.text = "[E] 开启通道"
+		_prompt.modulate = Color(0.52, 0.94, 0.80)
+
+
+func _build(accent: Color) -> void:
+	if _panel != null:
+		return
+	name = "Door_%s" % direction.capitalize()
+	collision_layer = 1
+	collision_mask = 0
+	_panel = Node3D.new()
+	_panel.name = "DoorPanel"
+	_panel.position.y = TOWER_GEOMETRY.DOOR_CLEAR_HEIGHT_M * 0.5
+	add_child(_panel)
+	if _panel_visual_scene != null:
+		var visual := _panel_visual_scene.instantiate() as Node3D
+		visual.name = "ImportedDoorVisual"
+		# 导入门以底边中心为原点；DoorPanel动画根仍以门中心为基准。
+		visual.position.y = -TOWER_GEOMETRY.DOOR_CLEAR_HEIGHT_M * 0.5
+		_panel.add_child(visual)
+		_set_geometry_shadow_casting(visual, true)
+		set_meta("visual_asset_id", str(visual.get_meta("asset_id", "")))
+		set_meta("shadow_policy", "cast_and_receive")
+	else:
+		_build_procedural_panel(accent)
+	var shape := BoxShape3D.new()
+	shape.size = Vector3(
+		TOWER_GEOMETRY.DOOR_CLEAR_WIDTH_M,
+		TOWER_GEOMETRY.DOOR_CLEAR_HEIGHT_M,
+		COLLISION_DEPTH_M
+	)
+	_collision = CollisionShape3D.new()
+	_collision.name = "DoorCollision"
+	_collision.position.y = TOWER_GEOMETRY.DOOR_CLEAR_HEIGHT_M * 0.5
+	_collision.shape = shape
+	add_child(_collision)
+	_prompt = Label3D.new()
+	_prompt.name = "DoorPrompt"
+	_prompt.position = Vector3(
+		0,
+		TOWER_GEOMETRY.DOOR_CLEAR_HEIGHT_M + 0.62,
+		0
+	)
+	_prompt.text = "[E] 使用房间钥匙"
+	_prompt.font_size = 38
+	_prompt.pixel_size = 0.011
+	_prompt.outline_size = 8
+	_prompt.visible = false
+	add_child(_prompt)
+	set_open(false, true)
+
+
+## 降级门板：只剩一块深色实心板。形参保留 `configure(accent) → _build(accent)` 的
+## 调用契约，本函数已不再消费它。
+## 2026-09-19 起两条运行时调用点（DungeonRoom3D._build_door、
+## TowerDescent3D._install_base_rooftop_transit_door）都传正式门扇 prefab，
+## 因此本路径只能由「显式传 null」触发，不是「prefab 加载失败」的兜底
+## ——prefab 路径走的是编译期 preload，缺文件会直接编译失败，不会静默降级到这里。
+## 保留它是为了让「本局不要门板」这种明确诉求有一个出口。
+func _build_procedural_panel(_accent: Color) -> void:
+	var material := StandardMaterial3D.new()
+	material.albedo_color = Color(0.11, 0.13, 0.13)
+	material.metallic = 0.78
+	material.roughness = 0.34
+	var panel_mesh := BoxMesh.new()
+	panel_mesh.size = Vector3(
+		TOWER_GEOMETRY.DOOR_CLEAR_WIDTH_M,
+		TOWER_GEOMETRY.DOOR_CLEAR_HEIGHT_M,
+		PANEL_THICKNESS_M
+	)
+	panel_mesh.material = material
+	var panel_visual := MeshInstance3D.new()
+	panel_visual.name = "ProceduralDoorPanel"
+	panel_visual.mesh = panel_mesh
+	_panel.add_child(panel_visual)
+	# 原先这里还有一对 LockStripeFront / LockStripeBack（1.584×0.11×0.035m、
+	# 离地 1.25m 的亮青色自发光横条）。它只是程序门板的点缀，不挂任何游戏逻辑
+	# （无 meta、无碰撞、无外部引用），按需求已整体移除。
+
+
+func _set_geometry_shadow_casting(root: Node, enabled: bool) -> void:
+	if root is GeometryInstance3D:
+		(root as GeometryInstance3D).cast_shadow = (
+			GeometryInstance3D.SHADOW_CASTING_SETTING_ON
+			if enabled
+			else GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+		)
+	for child in root.get_children():
+		_set_geometry_shadow_casting(child, enabled)

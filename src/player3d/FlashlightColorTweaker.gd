@@ -1,0 +1,1457 @@
+class_name FlashlightColorTweaker
+extends PanelContainer
+## 实时调参面板：顶部 tab 菜单在「调整灯光」「后处理」「基地雾气」「预留」之间切换。
+## P 键整体切显隐。
+##
+## 灯光 tab：ForwardBeam / EnvironmentSpill / AvatarFrontFill 三盏灯
+##   的 color + energy，通过 PlayerFlashlight3D 的公开 setter 同时写
+##   export 变量与实时灯节点，toggle / 模块切换 / _apply_configuration
+##   后保留新值。
+##
+## 后处理 tab：各向异性（glow_anisotropy_strength/expansion）+ 滤镜色彩
+##   调整（adjustment_enabled + brightness/contrast/saturation）。所有
+##   写入经 GraphicsSettingsManager.set_debug_postfx() 落到 in-memory
+##   调试覆盖层，不污染玩家画质档和持久化 cfg。
+##
+## 预留 tab：测试工具位。目前放「一键解锁远征关卡02」——
+##   正式解锁路径是通关远征关卡01，这里直接改存档跳过前置，仅供调试。
+
+const ENERGY_SLIDER_MIN := 0.0
+const ENERGY_SLIDER_MAX := 16.0
+const ENERGY_SLIDER_STEP := 0.05
+
+const ANISO_STRENGTH_MIN := 0.0
+const ANISO_STRENGTH_MAX := 16.0
+const ANISO_STRENGTH_STEP := 0.05
+const ANISO_EXPANSION_MIN := 0.0
+const ANISO_EXPANSION_MAX := 1.0
+const ANISO_EXPANSION_STEP := 0.01
+
+const ADJ_BRIGHTNESS_MIN := 0.0
+const ADJ_BRIGHTNESS_MAX := 2.0
+const ADJ_BRIGHTNESS_STEP := 0.01
+const ADJ_CONTRAST_MIN := 0.0
+const ADJ_CONTRAST_MAX := 2.0
+const ADJ_CONTRAST_STEP := 0.01
+const ADJ_SATURATION_MIN := 0.0
+const ADJ_SATURATION_MAX := 2.0
+const ADJ_SATURATION_STEP := 0.01
+const ADJ_HUE_MIN := 0.0
+const ADJ_HUE_MAX := 1.0
+const ADJ_HUE_STEP := 0.005
+
+const GRAIN_STRENGTH_MIN := 0.0
+const GRAIN_STRENGTH_MAX := 1.0
+const GRAIN_STRENGTH_STEP := 0.01
+const GRAIN_SIZE_MIN := 0.05
+const GRAIN_SIZE_MAX := 3.0
+const GRAIN_SIZE_STEP := 0.05
+
+const TV_GLOW_ANISO_MIN := 0.0
+const TV_GLOW_ANISO_MAX := 16.0
+const TV_GLOW_ANISO_STEP := 0.05
+const TV_GLOW_STRENGTH_MIN := 0.0
+const TV_GLOW_STRENGTH_MAX := 2.0
+const TV_GLOW_STRENGTH_STEP := 0.01
+const TV_GLOW_HDR_THRESHOLD_MIN := 0.0
+const TV_GLOW_HDR_THRESHOLD_MAX := 4.0
+const TV_GLOW_HDR_THRESHOLD_STEP := 0.01
+const TV_GLOW_HDR_SCALE_MIN := 0.0
+const TV_GLOW_HDR_SCALE_MAX := 4.0
+const TV_GLOW_HDR_SCALE_STEP := 0.01
+
+const BASE_FOG_DENSITY_MIN := 0.0
+const BASE_FOG_DENSITY_MAX := 0.05
+const BASE_FOG_DENSITY_STEP := 0.0005
+
+# 镜头雾气 tab：当前场景雾气的滑条范围。距离雾沿用基地雾档位；
+# 体积雾跨度更小（Boss 房量级 0.0002），步进取细一档。
+const SCENE_FOG_DENSITY_MIN := 0.0
+const SCENE_FOG_DENSITY_MAX := 0.05
+const SCENE_FOG_DENSITY_STEP := 0.0005
+const SCENE_VOLUMETRIC_FOG_DENSITY_STEP := 0.0001
+## 镜头雾气页开着时，读数按这个间隔跟一次场景实际值 —— 走位换房会让雾变，
+## 只刷「读数」不刷滑条，避免跟用户正在拖的手抢。
+const CAMERA_FOG_READOUT_REFRESH_SECONDS := 0.25
+
+# 镜头平移的四个世界方向（左右按镜头当时的水平右向解算）。
+const CAMERA_PAN_UP := 0
+const CAMERA_PAN_DOWN := 1
+const CAMERA_PAN_LEFT := 2
+const CAMERA_PAN_RIGHT := 3
+
+enum TabId { LIGHT, POSTFX, BASE_FOG, RESERVED_3, CAMERA_FOG }
+
+const TAB_LABELS := {
+	TabId.LIGHT: "调整灯光",
+	TabId.POSTFX: "后处理",
+	TabId.BASE_FOG: "基地雾气",
+	TabId.RESERVED_3: "预留",
+	TabId.CAMERA_FOG: "镜头雾气",
+}
+
+var _flashlight: PlayerFlashlight3D
+var _status_label: Label
+
+# 灯光 tab 控件引用
+var _beam_color: ColorPickerButton
+var _beam_energy_slider: HSlider
+var _beam_energy_label: Label
+var _spill_color: ColorPickerButton
+var _spill_energy_slider: HSlider
+var _spill_energy_label: Label
+var _fill_color: ColorPickerButton
+var _fill_energy_slider: HSlider
+var _fill_energy_label: Label
+
+# 灯光 tab 初次打开时捕获的 export 默认值，供"复位"按钮使用。
+var _initial_beam_color: Color
+var _initial_beam_energy: float
+var _initial_spill_color: Color
+var _initial_spill_energy: float
+var _initial_fill_color: Color
+var _initial_fill_energy: float
+var _has_initial := false
+
+# 后处理 tab 控件引用
+var _postfx_aniso_strength_slider: HSlider
+var _postfx_aniso_strength_label: Label
+var _postfx_aniso_expansion_slider: HSlider
+var _postfx_aniso_expansion_label: Label
+var _postfx_adjustment_toggle: CheckButton
+var _postfx_hue_slider: HSlider
+var _postfx_hue_label: Label
+var _postfx_brightness_slider: HSlider
+var _postfx_brightness_label: Label
+var _postfx_contrast_slider: HSlider
+var _postfx_contrast_label: Label
+var _postfx_saturation_slider: HSlider
+var _postfx_saturation_label: Label
+
+# 噪点
+var _postfx_grain_toggle: CheckButton
+var _postfx_grain_strength_slider: HSlider
+var _postfx_grain_strength_label: Label
+var _postfx_grain_size_slider: HSlider
+var _postfx_grain_size_label: Label
+
+# 电视干扰
+var _postfx_tv_toggle: CheckButton
+var _postfx_tv_glow_aniso_slider: HSlider
+var _postfx_tv_glow_aniso_label: Label
+var _postfx_tv_glow_strength_slider: HSlider
+var _postfx_tv_glow_strength_label: Label
+var _postfx_tv_glow_hdr_threshold_slider: HSlider
+var _postfx_tv_glow_hdr_threshold_label: Label
+var _postfx_tv_glow_hdr_scale_slider: HSlider
+var _postfx_tv_glow_hdr_scale_label: Label
+
+# 基地雾气 tab 控件引用
+var _base_fog_density_slider: HSlider
+var _base_fog_density_label: Label
+var _base_volumetric_fog_density_slider: HSlider
+var _base_volumetric_fog_density_label: Label
+
+# tab 容器 / 按钮
+var _tab_buttons: Dictionary = {}
+var _tab_pages: Dictionary = {}
+var _active_tab: TabId = TabId.LIGHT
+
+# 预留 tab（测试工具）控件引用
+var _reserved_expedition_status: Label
+
+# 镜头雾气 tab 控件引用
+var _camera_pitch_value_label: Label
+var _camera_dolly_value_label: Label
+var _camera_pan_value_label: Label
+var _scene_fog_status: Label
+var _scene_fog_density_slider: HSlider
+var _scene_fog_density_label: Label
+var _scene_volumetric_fog_density_slider: HSlider
+var _scene_volumetric_fog_density_label: Label
+
+# 镜头雾气 tab 的两个外部依赖：玩家（姿态偏移真源）与当前场景大气节点
+# （雾气临时覆盖的宿主）。两者都在用到的当帧惰性解析，不缓存跨场景的悬垂引用。
+var _player3d: Player3D
+var _atmosphere: Node
+var _readout_refresh_accumulator := 0.0
+
+func _ready() -> void:
+	process_mode = Node.PROCESS_MODE_ALWAYS
+	z_index = 2100
+	mouse_filter = Control.MOUSE_FILTER_STOP
+	visible = false
+	anchor_left = 0.0
+	anchor_top = 0.0
+	anchor_right = 0.0
+	anchor_bottom = 0.0
+	offset_left = 18.0
+	offset_top = 18.0
+	offset_right = 468.0
+	offset_bottom = 820.0
+	custom_minimum_size = Vector2(430, 0)
+	_build_ui()
+	UIStyleFactory.apply_prism_tree(self, {"button_role": "auto"})
+	_resolve_flashlight()
+	_select_tab(TabId.LIGHT)
+	_setup_postfx_persist()
+	_apply_persisted_postfx()
+
+# 沿父链向上找 Player3D，再拿到挂在它下面的 PlayerFlashlight3D。
+# 节点未就绪时（早期 _ready 顺序）允许稍后重试。
+func _resolve_flashlight() -> void:
+	var node := get_parent()
+	while node != null:
+		if node is Player3D:
+			_player3d = node as Player3D
+			_flashlight = node.get_node_or_null("PlayerFlashlight3D") as PlayerFlashlight3D
+			if _flashlight != null and not _has_initial:
+				_initial_beam_color = _flashlight.get_beam_color()
+				_initial_beam_energy = _flashlight.get_beam_energy()
+				_initial_spill_color = _flashlight.get_spill_color()
+				_initial_spill_energy = _flashlight.get_spill_energy()
+				_initial_fill_color = _flashlight.get_front_fill_color()
+				_initial_fill_energy = _flashlight.get_front_fill_energy()
+				_has_initial = true
+			_refresh_status_label()
+			return
+		node = node.get_parent()
+
+func _unhandled_input(event: InputEvent) -> void:
+	var key_event := event as InputEventKey
+	if key_event == null or not key_event.pressed or key_event.echo:
+		return
+	var key := key_event.keycode if key_event.keycode != 0 else key_event.physical_keycode
+	if key != KEY_P:
+		return
+	visible = not visible
+	if visible:
+		if _flashlight == null:
+			_resolve_flashlight()
+		_sync_from_flashlight()
+		_sync_postfx_from_manager()
+		_refresh_reserved_status()
+		if _active_tab == TabId.CAMERA_FOG:
+			_refresh_camera_value_labels()
+			_sync_scene_fog_from_scene()
+	get_viewport().set_input_as_handled()
+
+
+## 镜头雾气页的活读数：只在「面板可见 + 该页激活」时按固定间隔跑，
+## 页面没开时一帧都不多花。
+func _process(delta: float) -> void:
+	if not visible or _active_tab != TabId.CAMERA_FOG:
+		return
+	_readout_refresh_accumulator += delta
+	if _readout_refresh_accumulator < CAMERA_FOG_READOUT_REFRESH_SECONDS:
+		return
+	_readout_refresh_accumulator = 0.0
+	_refresh_camera_value_labels()
+	_refresh_scene_fog_status()
+
+
+func _sync_from_flashlight() -> void:
+	if _flashlight == null:
+		_refresh_status_label()
+		return
+	_block_light_signals(true)
+	_beam_color.color = _flashlight.get_beam_color()
+	_beam_energy_slider.value = _flashlight.get_beam_energy()
+	_spill_color.color = _flashlight.get_spill_color()
+	_spill_energy_slider.value = _flashlight.get_spill_energy()
+	_fill_color.color = _flashlight.get_front_fill_color()
+	_fill_energy_slider.value = _flashlight.get_front_fill_energy()
+	_block_light_signals(false)
+	_refresh_value_labels()
+	_refresh_status_label()
+
+func _sync_postfx_from_manager() -> void:
+	if not is_instance_valid(_postfx_aniso_strength_slider):
+		return
+	var snap := _get_debug_postfx_snapshot()
+	_block_postfx_signals(true)
+	_postfx_aniso_strength_slider.value = float(snap.get("debug_postfx_anisotropy_strength", 0.0))
+	_postfx_aniso_expansion_slider.value = float(snap.get("debug_postfx_anisotropy_expansion", 0.0))
+	_postfx_adjustment_toggle.button_pressed = bool(snap.get("debug_postfx_adjustment_enabled", true))
+	_postfx_brightness_slider.value = float(snap.get("debug_postfx_adjustment_brightness", 1.0))
+	_postfx_contrast_slider.value = float(snap.get("debug_postfx_adjustment_contrast", 1.0))
+	_postfx_saturation_slider.value = float(snap.get("debug_postfx_adjustment_saturation", 1.0))
+
+	# 噪点 + 色相走 PostfxOverlay autoload，不再走 GraphicsSettingsManager
+	# 调试钩子（Environment 里没有这些属性）。
+	var overlay := _get_postfx_overlay()
+	if overlay != null:
+		_postfx_grain_toggle.button_pressed = bool(overlay.is_grain_enabled())
+		_postfx_grain_strength_slider.value = float(overlay.get_grain_strength())
+		_postfx_grain_size_slider.value = float(overlay.get_grain_size())
+		_postfx_hue_slider.value = float(overlay.get_hue_shift())
+	else:
+		_postfx_grain_toggle.button_pressed = false
+		_postfx_grain_strength_slider.value = 0.0
+		_postfx_grain_size_slider.value = 1.0
+		_postfx_hue_slider.value = 0.0
+
+	_postfx_tv_toggle.button_pressed = bool(snap.get("debug_postfx_tv_distortion_enabled", false))
+	_postfx_tv_glow_aniso_slider.value = float(snap.get("debug_postfx_tv_glow_anisotropy", 0.0))
+	_postfx_tv_glow_strength_slider.value = float(snap.get("debug_postfx_tv_glow_strength", 0.92))
+	_postfx_tv_glow_hdr_threshold_slider.value = float(snap.get("debug_postfx_tv_glow_hdr_threshold", 1.08))
+	_postfx_tv_glow_hdr_scale_slider.value = float(snap.get("debug_postfx_tv_glow_hdr_scale", 1.65))
+	_base_fog_density_slider.value = float(snap.get(
+		"debug_base_interior_fog_density",
+		TowerAtmosphere3D.BASE_INTERIOR_FOG_DENSITY
+	))
+	_base_volumetric_fog_density_slider.value = float(snap.get(
+		"debug_base_interior_volumetric_fog_density",
+		TowerAtmosphere3D.BASE_INTERIOR_VOLUMETRIC_FOG_DENSITY
+	))
+	_block_postfx_signals(false)
+	_refresh_postfx_value_labels()
+	_refresh_postfx_controls_enabled()
+
+func _refresh_status_label() -> void:
+	if _status_label == null:
+		return
+	if _flashlight == null:
+		_status_label.text = "未连接 PlayerFlashlight3D"
+	else:
+		_status_label.text = "已连接 · 默认值已锁定为面板首次打开时的 export 值"
+
+func _refresh_value_labels() -> void:
+	_beam_energy_label.text = "%.2f" % _beam_energy_slider.value
+	_spill_energy_label.text = "%.2f" % _spill_energy_slider.value
+	_fill_energy_label.text = "%.2f" % _fill_energy_slider.value
+
+func _refresh_postfx_value_labels() -> void:
+	_postfx_aniso_strength_label.text = "%.2f" % _postfx_aniso_strength_slider.value
+	_postfx_aniso_expansion_label.text = "%.2f" % _postfx_aniso_expansion_slider.value
+	_postfx_hue_label.text = "%.3f" % _postfx_hue_slider.value
+	_postfx_brightness_label.text = "%.2f" % _postfx_brightness_slider.value
+	_postfx_contrast_label.text = "%.2f" % _postfx_contrast_slider.value
+	_postfx_saturation_label.text = "%.2f" % _postfx_saturation_slider.value
+	_postfx_grain_strength_label.text = "%.2f" % _postfx_grain_strength_slider.value
+	_postfx_grain_size_label.text = "%.2f" % _postfx_grain_size_slider.value
+	_postfx_tv_glow_aniso_label.text = "%.2f" % _postfx_tv_glow_aniso_slider.value
+	_postfx_tv_glow_strength_label.text = "%.2f" % _postfx_tv_glow_strength_slider.value
+	_postfx_tv_glow_hdr_threshold_label.text = "%.2f" % _postfx_tv_glow_hdr_threshold_slider.value
+	_postfx_tv_glow_hdr_scale_label.text = "%.2f" % _postfx_tv_glow_hdr_scale_slider.value
+	_base_fog_density_label.text = "%.4f" % _base_fog_density_slider.value
+	_base_volumetric_fog_density_label.text = "%.4f" % _base_volumetric_fog_density_slider.value
+
+func _refresh_postfx_controls_enabled() -> void:
+	# 「色彩调整」总开关仅负责 brightness/contrast/saturation 三件套。
+	# 色相（hue）走独立 shader uniform，不被总开关绑灰。
+	var color_on := _postfx_adjustment_toggle.button_pressed
+	_postfx_hue_slider.editable = true
+	_postfx_brightness_slider.editable = color_on
+	_postfx_contrast_slider.editable = color_on
+	_postfx_saturation_slider.editable = color_on
+
+	# 「噪点」总开关负责强度与颗粒尺寸。
+	var grain_on := _postfx_grain_toggle.button_pressed
+	_postfx_grain_strength_slider.editable = grain_on
+	_postfx_grain_size_slider.editable = grain_on
+
+	# 「电视干扰」总开关负责 4 个 glow 字段。
+	var tv_on := _postfx_tv_toggle.button_pressed
+	_postfx_tv_glow_aniso_slider.editable = tv_on
+	_postfx_tv_glow_strength_slider.editable = tv_on
+	_postfx_tv_glow_hdr_threshold_slider.editable = tv_on
+	_postfx_tv_glow_hdr_scale_slider.editable = tv_on
+
+func _block_light_signals(block: bool) -> void:
+	_beam_color.set_block_signals(block)
+	_beam_energy_slider.set_block_signals(block)
+	_spill_color.set_block_signals(block)
+	_spill_energy_slider.set_block_signals(block)
+	_fill_color.set_block_signals(block)
+	_fill_energy_slider.set_block_signals(block)
+
+func _block_postfx_signals(block: bool) -> void:
+	_postfx_aniso_strength_slider.set_block_signals(block)
+	_postfx_aniso_expansion_slider.set_block_signals(block)
+	_postfx_adjustment_toggle.set_block_signals(block)
+	_postfx_hue_slider.set_block_signals(block)
+	_postfx_brightness_slider.set_block_signals(block)
+	_postfx_contrast_slider.set_block_signals(block)
+	_postfx_saturation_slider.set_block_signals(block)
+	_postfx_grain_toggle.set_block_signals(block)
+	_postfx_grain_strength_slider.set_block_signals(block)
+	_postfx_grain_size_slider.set_block_signals(block)
+	_postfx_tv_toggle.set_block_signals(block)
+	_postfx_tv_glow_aniso_slider.set_block_signals(block)
+	_postfx_tv_glow_strength_slider.set_block_signals(block)
+	_postfx_tv_glow_hdr_threshold_slider.set_block_signals(block)
+	_postfx_tv_glow_hdr_scale_slider.set_block_signals(block)
+	_base_fog_density_slider.set_block_signals(block)
+	_base_volumetric_fog_density_slider.set_block_signals(block)
+
+func _get_debug_postfx_snapshot() -> Dictionary:
+	if GraphicsSettingsManager != null and GraphicsSettingsManager.has_method("get_debug_postfx_snapshot"):
+		return GraphicsSettingsManager.get_debug_postfx_snapshot()
+	return {}
+
+# 拿 PostfxOverlay autoload 引用。autoload 名字在 project.godot 里注册为
+# PostfxOverlay。如果运行中未初始化（早期 _ready 顺序）返回 null。
+func _get_postfx_overlay() -> Node:
+	if Engine.has_singleton("PostfxOverlay"):
+		return Engine.get_singleton("PostfxOverlay") as Node
+	var main_loop: MainLoop = Engine.get_main_loop()
+	if main_loop == null:
+		return null
+	if not (main_loop is SceneTree):
+		return null
+	var tree := main_loop as SceneTree
+	var root: Node = tree.root
+	if root == null:
+		return null
+	return root.get_node_or_null("PostfxOverlay")
+
+# ---------- UI 构造 ----------
+
+func _build_ui() -> void:
+	var root := VBoxContainer.new()
+	root.name = "Root"
+	root.add_theme_constant_override("separation", 8)
+	add_child(root)
+
+	_build_tab_bar(root)
+
+	var title := Label.new()
+	title.name = "TitleLabel"
+	title.text = "调试面板 · [P 切换]"
+	root.add_child(title)
+
+	_status_label = Label.new()
+	_status_label.name = "StatusLabel"
+	_status_label.text = ""
+	root.add_child(_status_label)
+
+	root.add_child(HSeparator.new())
+
+	_build_light_page(root)
+	_build_postfx_page(root)
+	_build_base_fog_page(root)
+	_build_reserved_page(root)
+	_build_camera_fog_page(root)
+	root.add_child(HSeparator.new())
+
+	var reset_btn := Button.new()
+	reset_btn.name = "ResetButton"
+	reset_btn.text = "复位灯光为 export 默认值"
+	reset_btn.pressed.connect(_on_reset_pressed)
+	root.add_child(reset_btn)
+
+	var clear_postfx_btn := Button.new()
+	clear_postfx_btn.name = "ClearPostfxButton"
+	clear_postfx_btn.text = "清除后处理 / 基地雾气调试覆盖"
+	clear_postfx_btn.pressed.connect(_on_clear_postfx_pressed)
+	root.add_child(clear_postfx_btn)
+
+	var export_postfx_btn := Button.new()
+	export_postfx_btn.name = "ExportPostfxButton"
+	export_postfx_btn.text = "导出当前调试参数（剪贴板 + 日志）"
+	export_postfx_btn.pressed.connect(_on_export_postfx_pressed)
+	root.add_child(export_postfx_btn)
+
+	var persist_hint := Label.new()
+	persist_hint.name = "PersistHint"
+	persist_hint.text = "「后处理 / 基地雾气」参数会自动记住，下次进游戏自动恢复；「镜头雾气」页为临时值，不记录"
+	persist_hint.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	root.add_child(persist_hint)
+
+func _build_tab_bar(parent: Container) -> void:
+	var bar := HBoxContainer.new()
+	bar.name = "TabBar"
+	bar.add_theme_constant_override("separation", 6)
+	parent.add_child(bar)
+	for tab_id in [TabId.LIGHT, TabId.POSTFX, TabId.BASE_FOG, TabId.RESERVED_3, TabId.CAMERA_FOG]:
+		var btn := Button.new()
+		btn.name = "TabButton_%d" % int(tab_id)
+		btn.text = TAB_LABELS[tab_id]
+		btn.toggle_mode = true
+		btn.focus_mode = Control.FOCUS_NONE
+		btn.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+		btn.pressed.connect(_on_tab_button_pressed.bind(tab_id))
+		bar.add_child(btn)
+		_tab_buttons[tab_id] = btn
+
+func _on_tab_button_pressed(tab_id: TabId) -> void:
+	_select_tab(tab_id)
+
+func _select_tab(tab_id: TabId) -> void:
+	_active_tab = tab_id
+	for key in _tab_buttons.keys():
+		var btn := _tab_buttons[key] as Button
+		if btn != null:
+			btn.button_pressed = (key == tab_id)
+	for key in _tab_pages.keys():
+		var page := _tab_pages[key] as Control
+		if page != null:
+			page.visible = (key == tab_id)
+	# 镜头雾气页「打开即显示当前值」：切到该页时回填镜头偏移与场景雾气读数。
+	if tab_id == TabId.CAMERA_FOG:
+		_refresh_camera_value_labels()
+		_sync_scene_fog_from_scene()
+
+func _build_light_page(parent: Container) -> void:
+	var page := VBoxContainer.new()
+	page.name = "LightPage"
+	page.add_theme_constant_override("separation", 6)
+	parent.add_child(page)
+	_tab_pages[TabId.LIGHT] = page
+
+	_build_light_section(page, "ForwardBeam · 前向主灯", "beam")
+	page.add_child(HSeparator.new())
+	_build_light_section(page, "EnvironmentSpill · 环境泛光", "spill")
+	page.add_child(HSeparator.new())
+	_build_light_section(page, "AvatarFrontFill · 角色补光", "fill")
+
+func _build_postfx_page(parent: Container) -> void:
+	var page := VBoxContainer.new()
+	page.name = "PostfxPage"
+	page.add_theme_constant_override("separation", 6)
+	parent.add_child(page)
+	_tab_pages[TabId.POSTFX] = page
+
+	# —— 各向异性 ——
+	var aniso_title := Label.new()
+	aniso_title.text = "各向异性（glow_anisotropy_*）"
+	page.add_child(aniso_title)
+
+	_postfx_aniso_strength_slider = _add_slider_row(
+		page, "强度", ANISO_STRENGTH_MIN, ANISO_STRENGTH_MAX, ANISO_STRENGTH_STEP
+	)
+	_postfx_aniso_strength_label = _find_value_label_for(_postfx_aniso_strength_slider)
+	_postfx_aniso_strength_slider.value_changed.connect(_on_aniso_strength_changed)
+
+	_postfx_aniso_expansion_slider = _add_slider_row(
+		page, "扩散", ANISO_EXPANSION_MIN, ANISO_EXPANSION_MAX, ANISO_EXPANSION_STEP
+	)
+	_postfx_aniso_expansion_label = _find_value_label_for(_postfx_aniso_expansion_slider)
+	_postfx_aniso_expansion_slider.value_changed.connect(_on_aniso_expansion_changed)
+
+	page.add_child(HSeparator.new())
+
+	# —— 滤镜色彩调整 ——
+	var adj_title := Label.new()
+	adj_title.text = "滤镜色彩调整（adjustment_*）"
+	page.add_child(adj_title)
+
+	_postfx_adjustment_toggle = CheckButton.new()
+	_postfx_adjustment_toggle.text = "启用色彩调整"
+	_postfx_adjustment_toggle.focus_mode = Control.FOCUS_NONE
+	_postfx_adjustment_toggle.toggled.connect(_on_adjustment_toggle_changed)
+	page.add_child(_postfx_adjustment_toggle)
+
+	_postfx_hue_slider = _add_slider_row(
+		page, "色相", ADJ_HUE_MIN, ADJ_HUE_MAX, ADJ_HUE_STEP
+	)
+	_postfx_hue_label = _find_value_label_for(_postfx_hue_slider)
+	_postfx_hue_slider.value_changed.connect(_on_hue_changed)
+
+	_postfx_brightness_slider = _add_slider_row(
+		page, "亮度", ADJ_BRIGHTNESS_MIN, ADJ_BRIGHTNESS_MAX, ADJ_BRIGHTNESS_STEP
+	)
+	_postfx_brightness_label = _find_value_label_for(_postfx_brightness_slider)
+	_postfx_brightness_slider.value_changed.connect(_on_brightness_changed)
+
+	_postfx_contrast_slider = _add_slider_row(
+		page, "对比", ADJ_CONTRAST_MIN, ADJ_CONTRAST_MAX, ADJ_CONTRAST_STEP
+	)
+	_postfx_contrast_label = _find_value_label_for(_postfx_contrast_slider)
+	_postfx_contrast_slider.value_changed.connect(_on_contrast_changed)
+
+	_postfx_saturation_slider = _add_slider_row(
+		page, "饱和", ADJ_SATURATION_MIN, ADJ_SATURATION_MAX, ADJ_SATURATION_STEP
+	)
+	_postfx_saturation_label = _find_value_label_for(_postfx_saturation_slider)
+	_postfx_saturation_slider.value_changed.connect(_on_saturation_changed)
+
+	page.add_child(HSeparator.new())
+
+	# —— 噪点效果 ——
+	var grain_title := Label.new()
+	grain_title.text = "噪点效果（grain_*）"
+	page.add_child(grain_title)
+
+	_postfx_grain_toggle = CheckButton.new()
+	_postfx_grain_toggle.text = "启用噪点"
+	_postfx_grain_toggle.focus_mode = Control.FOCUS_NONE
+	_postfx_grain_toggle.toggled.connect(_on_grain_toggle_changed)
+	page.add_child(_postfx_grain_toggle)
+
+	_postfx_grain_strength_slider = _add_slider_row(
+		page, "强度", GRAIN_STRENGTH_MIN, GRAIN_STRENGTH_MAX, GRAIN_STRENGTH_STEP
+	)
+	_postfx_grain_strength_label = _find_value_label_for(_postfx_grain_strength_slider)
+	_postfx_grain_strength_slider.value_changed.connect(_on_grain_strength_changed)
+
+	_postfx_grain_size_slider = _add_slider_row(
+		page, "颗粒", GRAIN_SIZE_MIN, GRAIN_SIZE_MAX, GRAIN_SIZE_STEP
+	)
+	_postfx_grain_size_label = _find_value_label_for(_postfx_grain_size_slider)
+	_postfx_grain_size_slider.value_changed.connect(_on_grain_size_changed)
+
+	page.add_child(HSeparator.new())
+
+	# —— 电视干扰 ——
+	var tv_title := Label.new()
+	tv_title.text = "电视干扰（glow_anisotropy + glow_strength/HDR）"
+	page.add_child(tv_title)
+
+	_postfx_tv_toggle = CheckButton.new()
+	_postfx_tv_toggle.text = "启用电视干扰"
+	_postfx_tv_toggle.focus_mode = Control.FOCUS_NONE
+	_postfx_tv_toggle.toggled.connect(_on_tv_toggle_changed)
+	page.add_child(_postfx_tv_toggle)
+
+	_postfx_tv_glow_aniso_slider = _add_slider_row(
+		page, "各向异性", TV_GLOW_ANISO_MIN, TV_GLOW_ANISO_MAX, TV_GLOW_ANISO_STEP
+	)
+	_postfx_tv_glow_aniso_label = _find_value_label_for(_postfx_tv_glow_aniso_slider)
+	_postfx_tv_glow_aniso_slider.value_changed.connect(_on_tv_glow_aniso_changed)
+
+	_postfx_tv_glow_strength_slider = _add_slider_row(
+		page, "发光强度", TV_GLOW_STRENGTH_MIN, TV_GLOW_STRENGTH_MAX, TV_GLOW_STRENGTH_STEP
+	)
+	_postfx_tv_glow_strength_label = _find_value_label_for(_postfx_tv_glow_strength_slider)
+	_postfx_tv_glow_strength_slider.value_changed.connect(_on_tv_glow_strength_changed)
+
+	_postfx_tv_glow_hdr_threshold_slider = _add_slider_row(
+		page, "HDR 阈值", TV_GLOW_HDR_THRESHOLD_MIN, TV_GLOW_HDR_THRESHOLD_MAX, TV_GLOW_HDR_THRESHOLD_STEP
+	)
+	_postfx_tv_glow_hdr_threshold_label = _find_value_label_for(_postfx_tv_glow_hdr_threshold_slider)
+	_postfx_tv_glow_hdr_threshold_slider.value_changed.connect(_on_tv_glow_hdr_threshold_changed)
+
+	_postfx_tv_glow_hdr_scale_slider = _add_slider_row(
+		page, "HDR 缩放", TV_GLOW_HDR_SCALE_MIN, TV_GLOW_HDR_SCALE_MAX, TV_GLOW_HDR_SCALE_STEP
+	)
+	_postfx_tv_glow_hdr_scale_label = _find_value_label_for(_postfx_tv_glow_hdr_scale_slider)
+	_postfx_tv_glow_hdr_scale_slider.value_changed.connect(_on_tv_glow_hdr_scale_changed)
+
+
+func _build_base_fog_page(parent: Container) -> void:
+	var page := VBoxContainer.new()
+	page.name = "BaseFogPage"
+	page.add_theme_constant_override("separation", 8)
+	parent.add_child(page)
+	_tab_pages[TabId.BASE_FOG] = page
+
+	var title := Label.new()
+	title.text = "99F 基地室内环境雾"
+	page.add_child(title)
+
+	var hint := Label.new()
+	hint.text = "只调整基地建筑内部；三扇门外仍保持距离雾 0.030 / 体积雾 0.009。"
+	hint.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	page.add_child(hint)
+
+	_base_fog_density_slider = _add_slider_row(
+		page, "距离雾密度", BASE_FOG_DENSITY_MIN, BASE_FOG_DENSITY_MAX, BASE_FOG_DENSITY_STEP
+	)
+	_base_fog_density_label = _find_value_label_for(_base_fog_density_slider)
+	_base_fog_density_slider.value_changed.connect(_on_base_fog_density_changed)
+
+	_base_volumetric_fog_density_slider = _add_slider_row(
+		page, "体积雾密度", BASE_FOG_DENSITY_MIN, BASE_FOG_DENSITY_MAX, BASE_FOG_DENSITY_STEP
+	)
+	_base_volumetric_fog_density_label = _find_value_label_for(_base_volumetric_fog_density_slider)
+	_base_volumetric_fog_density_slider.value_changed.connect(_on_base_volumetric_fog_density_changed)
+
+
+# ---------- 预留 tab：测试工具 ----------
+
+func _build_reserved_page(parent: Container) -> void:
+	var page := VBoxContainer.new()
+	page.name = "ReservedPage"
+	page.add_theme_constant_override("separation", 8)
+	parent.add_child(page)
+	_tab_pages[TabId.RESERVED_3] = page
+
+	var title := Label.new()
+	title.text = "测试工具"
+	page.add_child(title)
+
+	var hint := Label.new()
+	hint.text = "正式解锁路径：在远征关卡01 中成功撤离（走到撤离房按 E 读条完成）。下方按钮直接改存档跳过该前置，仅供调试。"
+	hint.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	page.add_child(hint)
+
+	page.add_child(HSeparator.new())
+
+	_reserved_expedition_status = Label.new()
+	_reserved_expedition_status.name = "ExpeditionUnlockStatus"
+	_reserved_expedition_status.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	page.add_child(_reserved_expedition_status)
+	_refresh_reserved_status()
+
+	var unlock_btn := Button.new()
+	unlock_btn.name = "UnlockExpedition02Button"
+	unlock_btn.text = "一键解锁远征关卡02"
+	unlock_btn.pressed.connect(_on_unlock_expedition02_pressed)
+	page.add_child(unlock_btn)
+
+	var relock_btn := Button.new()
+	relock_btn.name = "RelockExpedition02Button"
+	relock_btn.text = "恢复远征关卡02为未解锁"
+	relock_btn.pressed.connect(_on_relock_expedition02_pressed)
+	page.add_child(relock_btn)
+
+
+func _refresh_reserved_status() -> void:
+	if _reserved_expedition_status == null:
+		return
+	var unlocked := BaseManager.is_expedition_level_unlocked("expedition_02")
+	_reserved_expedition_status.text = "当前状态：远征关卡02 %s" % (
+		"✔ 已解锁（情报室里可见）" if unlocked else "✘ 未解锁（情报室里看不到）"
+	)
+
+
+func _on_unlock_expedition02_pressed() -> void:
+	var ok := BaseManager.debug_unlock_expedition_level("expedition_02")
+	_refresh_reserved_status()
+	if not ok:
+		_reserved_expedition_status.text = "✘ 解锁写入失败，见控制台错误"
+
+
+func _on_relock_expedition02_pressed() -> void:
+	var ok := BaseManager.debug_relock_expedition_level("expedition_02")
+	_refresh_reserved_status()
+	if not ok:
+		_reserved_expedition_status.text = "✘ 回退写入失败，见控制台错误"
+
+
+# ---------- 镜头雾气 tab ----------
+# 两块内容，共同点：都只在「本次运行 + 本场景」内有效，一律不落盘。
+#
+# ① 镜头（临时）：以角色为轴的姿态偏移，三套 —— 俯仰圆轴 / 前后推拉 / 上下左右平移。
+#    角度 5°/次、位移 0.2 m/次，每次点击把当前累计值打在行尾。
+#    真源在 Player3D（`_debug_camera_*`），本页只负责按钮与读数。
+# ② 当前场景雾气（临时）：打开本页即读本场景 Environment 的两套实际雾值
+#    （距离雾 + 体积雾），可在本场景内改。覆盖挂在本场景的 TowerAtmosphere3D 上，
+#    随场景节点销毁自动复原 —— 不写存档、不写 cfg，也不进本面板的持久化文件。
+
+func _build_camera_fog_page(parent: Container) -> void:
+	var page := VBoxContainer.new()
+	page.name = "CameraFogPage"
+	page.add_theme_constant_override("separation", 6)
+	parent.add_child(page)
+	_tab_pages[TabId.CAMERA_FOG] = page
+
+	var cam_title := Label.new()
+	cam_title.text = "镜头（临时 · 只改姿态，不记录）"
+	page.add_child(cam_title)
+
+	var cam_hint := Label.new()
+	cam_hint.text = "以角色为轴：俯仰 / 前后 / 上下左右。角度 5°/次，位移 0.2 m/次，仅本次运行有效。"
+	cam_hint.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	page.add_child(cam_hint)
+
+	_camera_pitch_value_label = _add_button_row(
+		page,
+		"俯仰",
+		[
+			{"text": "压低", "action": _on_camera_pitch.bind(-Player3D.DEBUG_CAMERA_PITCH_STEP_DEG)},
+			{"text": "抬高", "action": _on_camera_pitch.bind(Player3D.DEBUG_CAMERA_PITCH_STEP_DEG)},
+		]
+	)
+	_camera_dolly_value_label = _add_button_row(
+		page,
+		"前后",
+		[
+			{"text": "前进", "action": _on_camera_dolly.bind(-Player3D.DEBUG_CAMERA_TRAILING_STEP_M)},
+			{"text": "后退", "action": _on_camera_dolly.bind(Player3D.DEBUG_CAMERA_TRAILING_STEP_M)},
+		]
+	)
+	_camera_pan_value_label = _add_button_row(
+		page,
+		"平移",
+		[
+			{"text": "上", "action": _on_camera_pan.bind(CAMERA_PAN_UP)},
+			{"text": "下", "action": _on_camera_pan.bind(CAMERA_PAN_DOWN)},
+			{"text": "左", "action": _on_camera_pan.bind(CAMERA_PAN_LEFT)},
+			{"text": "右", "action": _on_camera_pan.bind(CAMERA_PAN_RIGHT)},
+		]
+	)
+
+	var reset_camera_btn := Button.new()
+	reset_camera_btn.name = "ResetCameraButton"
+	reset_camera_btn.text = "复位镜头偏移（俯仰 / 前后 / 平移 / 偏航）"
+	reset_camera_btn.pressed.connect(_on_reset_camera_pressed)
+	page.add_child(reset_camera_btn)
+
+	page.add_child(HSeparator.new())
+
+	var fog_title := Label.new()
+	fog_title.text = "当前场景雾气（临时 · 离开场景即复原）"
+	page.add_child(fog_title)
+
+	var fog_hint := Label.new()
+	fog_hint.text = "打开本页读取当前场景实际值；改动只作用于本场景运行期，不写存档、不记录。"
+	fog_hint.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	page.add_child(fog_hint)
+
+	var read_row := HBoxContainer.new()
+	read_row.name = "SceneFogReadRow"
+	read_row.add_theme_constant_override("separation", 6)
+	page.add_child(read_row)
+
+	var read_btn := Button.new()
+	read_btn.name = "ReadSceneFogButton"
+	read_btn.text = "读取当前值"
+	read_btn.focus_mode = Control.FOCUS_NONE
+	read_btn.pressed.connect(_on_read_scene_fog_pressed)
+	read_row.add_child(read_btn)
+
+	_scene_fog_status = Label.new()
+	_scene_fog_status.name = "SceneFogStatus"
+	_scene_fog_status.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	_scene_fog_status.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	read_row.add_child(_scene_fog_status)
+
+	_scene_fog_density_slider = _add_slider_row(
+		page, "场景雾", SCENE_FOG_DENSITY_MIN, SCENE_FOG_DENSITY_MAX, SCENE_FOG_DENSITY_STEP
+	)
+	_scene_fog_density_label = _find_value_label_for(_scene_fog_density_slider)
+	_scene_fog_density_slider.value_changed.connect(_on_scene_fog_density_changed)
+
+	_scene_volumetric_fog_density_slider = _add_slider_row(
+		page, "体积雾", SCENE_FOG_DENSITY_MIN, SCENE_FOG_DENSITY_MAX, SCENE_VOLUMETRIC_FOG_DENSITY_STEP
+	)
+	_scene_volumetric_fog_density_label = _find_value_label_for(_scene_volumetric_fog_density_slider)
+	_scene_volumetric_fog_density_slider.value_changed.connect(_on_scene_volumetric_fog_density_changed)
+
+	var clear_fog_btn := Button.new()
+	clear_fog_btn.name = "ClearSceneFogButton"
+	clear_fog_btn.text = "清除雾气覆盖（还原本场景原值）"
+	clear_fog_btn.pressed.connect(_on_clear_scene_fog_pressed)
+	page.add_child(clear_fog_btn)
+
+	_refresh_camera_value_labels()
+	_refresh_scene_fog_status()
+
+
+## 生成一行：[行标签] [按钮...] [数值]。返回该行的数值 Label（右侧对齐）。
+## buttons 每项形如 {"text": String, "action": Callable}。
+func _add_button_row(parent: Container, label_text: String, buttons: Array) -> Label:
+	var row := HBoxContainer.new()
+	row.name = "ButtonRow_" + label_text
+	row.add_theme_constant_override("separation", 6)
+	parent.add_child(row)
+
+	var lbl := Label.new()
+	lbl.text = label_text
+	lbl.custom_minimum_size = Vector2(40, 0)
+	row.add_child(lbl)
+
+	for entry in buttons:
+		var spec: Dictionary = entry
+		var btn := Button.new()
+		btn.text = str(spec.get("text", "?"))
+		btn.focus_mode = Control.FOCUS_NONE
+		btn.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+		var action: Callable = spec.get("action", Callable())
+		if action.is_valid():
+			btn.pressed.connect(action)
+		row.add_child(btn)
+
+	var value_lbl := Label.new()
+	value_lbl.name = "Value"
+	value_lbl.text = "-"
+	value_lbl.horizontal_alignment = HORIZONTAL_ALIGNMENT_RIGHT
+	# 要放得下极限值 "(-6.0, -6.0, -6.0) m"，否则平移读数会被截断。
+	value_lbl.custom_minimum_size = Vector2(126, 0)
+	row.add_child(value_lbl)
+	return value_lbl
+
+
+func _refresh_camera_value_labels() -> void:
+	if _camera_pitch_value_label == null:
+		return
+	if _player3d == null:
+		_resolve_flashlight()
+	var pitch := 0.0
+	var dolly := 0.0
+	var pan := Vector3.ZERO
+	if _player3d != null:
+		pitch = _player3d.get_debug_camera_pitch_offset_deg()
+		dolly = _player3d.get_debug_camera_trailing_offset_m()
+		pan = _player3d.get_debug_camera_pan_offset()
+	_camera_pitch_value_label.text = "%+.0f°" % pitch
+	_camera_dolly_value_label.text = "%+.1f m" % dolly
+	_camera_pan_value_label.text = "(%.1f, %.1f, %.1f) m" % [pan.x, pan.y, pan.z]
+
+
+func _on_camera_pitch(step_deg: float) -> void:
+	if _player3d != null:
+		_player3d.adjust_debug_camera_pitch(step_deg)
+	_refresh_camera_value_labels()
+
+
+func _on_camera_dolly(step_m: float) -> void:
+	if _player3d != null:
+		_player3d.adjust_debug_camera_trailing(step_m)
+	_refresh_camera_value_labels()
+
+
+func _on_camera_pan(direction: int) -> void:
+	if _player3d == null:
+		_resolve_flashlight()
+	if _player3d == null:
+		return
+	var amount := Player3D.DEBUG_CAMERA_PAN_STEP_M
+	var right := _camera_right_direction()
+	if direction == CAMERA_PAN_UP:
+		_player3d.adjust_debug_camera_pan(Vector3.UP * amount)
+	elif direction == CAMERA_PAN_DOWN:
+		_player3d.adjust_debug_camera_pan(Vector3.DOWN * amount)
+	elif direction == CAMERA_PAN_LEFT:
+		_player3d.adjust_debug_camera_pan(-right * amount)
+	elif direction == CAMERA_PAN_RIGHT:
+		_player3d.adjust_debug_camera_pan(right * amount)
+	_refresh_camera_value_labels()
+
+
+func _on_reset_camera_pressed() -> void:
+	if _player3d != null:
+		_player3d.reset_debug_camera_adjustments()
+	_refresh_camera_value_labels()
+
+
+## 镜头当时的水平右向 = 屏幕「右」。相机退化成竖直俯视时回退到世界 +X。
+func _camera_right_direction() -> Vector3:
+	if _player3d == null or _player3d.camera == null:
+		return Vector3.RIGHT
+	var right := _player3d.camera.global_basis.x
+	right.y = 0.0
+	if right.length_squared() <= 0.0001:
+		return Vector3.RIGHT
+	return right.normalized()
+
+
+## 当前场景大气节点（TowerAtmosphere3D）。它自己注册进 "time_system" 组；
+## 每帧重新校验有效性，避免跨场景留下悬垂引用。
+func _resolve_atmosphere() -> Node:
+	if _atmosphere != null and is_instance_valid(_atmosphere) and _atmosphere.is_inside_tree():
+		return _atmosphere
+	_atmosphere = null
+	var tree := get_tree()
+	if tree == null:
+		return null
+	_atmosphere = tree.get_first_node_in_group("time_system")
+	return _atmosphere
+
+
+func _scene_fog_snapshot() -> Dictionary:
+	var atmosphere := _resolve_atmosphere()
+	if atmosphere == null or not atmosphere.has_method("get_scene_fog_snapshot"):
+		return {}
+	var snapshot: Dictionary = atmosphere.call("get_scene_fog_snapshot")
+	return snapshot
+
+
+## 用本场景实际生效的雾值回填滑条（阻断信号，避免「只是读数」被当成一次改动）。
+func _sync_scene_fog_from_scene() -> void:
+	if _scene_fog_density_slider == null:
+		return
+	var snapshot := _scene_fog_snapshot()
+	if not snapshot.is_empty():
+		_block_scene_fog_signals(true)
+		_scene_fog_density_slider.value = clampf(
+			float(snapshot.get("distance", _scene_fog_density_slider.value)),
+			SCENE_FOG_DENSITY_MIN,
+			SCENE_FOG_DENSITY_MAX
+		)
+		_scene_volumetric_fog_density_slider.value = clampf(
+			float(snapshot.get("volumetric", _scene_volumetric_fog_density_slider.value)),
+			SCENE_FOG_DENSITY_MIN,
+			SCENE_FOG_DENSITY_MAX
+		)
+		_block_scene_fog_signals(false)
+	_refresh_scene_fog_value_labels()
+	_refresh_scene_fog_status()
+
+
+func _block_scene_fog_signals(block: bool) -> void:
+	_scene_fog_density_slider.set_block_signals(block)
+	_scene_volumetric_fog_density_slider.set_block_signals(block)
+
+
+func _refresh_scene_fog_value_labels() -> void:
+	if _scene_fog_density_label == null:
+		return
+	_scene_fog_density_label.text = "%.4f" % _scene_fog_density_slider.value
+	_scene_volumetric_fog_density_label.text = "%.4f" % _scene_volumetric_fog_density_slider.value
+
+
+func _refresh_scene_fog_status() -> void:
+	if _scene_fog_status == null:
+		return
+	var atmosphere := _resolve_atmosphere()
+	if atmosphere == null or not atmosphere.has_method("get_scene_fog_snapshot"):
+		_scene_fog_status.text = "未找到当前场景雾气节点"
+		return
+	var snapshot := _scene_fog_snapshot()
+	_scene_fog_status.text = "当前：场景雾 %.4f · 体积雾 %.4f" % [
+		float(snapshot.get("distance", 0.0)),
+		float(snapshot.get("volumetric", 0.0)),
+	]
+
+
+func _on_scene_fog_density_changed(value: float) -> void:
+	_scene_fog_density_label.text = "%.4f" % value
+	_apply_scene_fog_override()
+
+
+func _on_scene_volumetric_fog_density_changed(value: float) -> void:
+	_scene_volumetric_fog_density_label.text = "%.4f" % value
+	_apply_scene_fog_override()
+
+
+func _apply_scene_fog_override() -> void:
+	var atmosphere := _resolve_atmosphere()
+	if atmosphere == null or not atmosphere.has_method("set_debug_scene_fog_override"):
+		return
+	atmosphere.call(
+		"set_debug_scene_fog_override",
+		_scene_fog_density_slider.value,
+		_scene_volumetric_fog_density_slider.value
+	)
+	_refresh_scene_fog_status()
+
+
+func _on_read_scene_fog_pressed() -> void:
+	_sync_scene_fog_from_scene()
+
+
+func _on_clear_scene_fog_pressed() -> void:
+	var atmosphere := _resolve_atmosphere()
+	if atmosphere != null and atmosphere.has_method("clear_debug_scene_fog_override"):
+		atmosphere.call("clear_debug_scene_fog_override")
+	_sync_scene_fog_from_scene()
+
+
+# 生成一行：[标签] [HSlider] [数值]，返回 HSlider 引用；
+# 数值 Label 用唯一名挂在 row 内，便于 _find_value_label_for 反查。
+func _add_slider_row(parent: Container, label_text: String, min_v: float, max_v: float, step_v: float) -> HSlider:
+	var row := HBoxContainer.new()
+	row.name = "SliderRow_" + label_text
+	row.add_theme_constant_override("separation", 8)
+	parent.add_child(row)
+
+	var lbl := Label.new()
+	lbl.text = label_text
+	lbl.custom_minimum_size = Vector2(40, 0)
+	row.add_child(lbl)
+
+	var slider := HSlider.new()
+	slider.name = "Slider"
+	slider.min_value = min_v
+	slider.max_value = max_v
+	slider.step = step_v
+	slider.value = min_v
+	slider.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	row.add_child(slider)
+
+	var value_lbl := Label.new()
+	value_lbl.name = "Value"
+	value_lbl.text = "%.2f" % min_v
+	value_lbl.custom_minimum_size = Vector2(48, 0)
+	row.add_child(value_lbl)
+	return slider
+
+func _find_value_label_for(slider: HSlider) -> Label:
+	var row := slider.get_parent()
+	if row == null:
+		return null
+	return row.get_node_or_null("Value") as Label
+
+func _build_light_section(parent: Container, title_text: String, light_id: String) -> void:
+	var box := VBoxContainer.new()
+	box.name = light_id.capitalize() + "Section"
+	box.add_theme_constant_override("separation", 4)
+	parent.add_child(box)
+
+	var section_title := Label.new()
+	section_title.name = "SectionTitle"
+	section_title.text = title_text
+	box.add_child(section_title)
+
+	# 第一行：颜色 + ColorPickerButton
+	var color_row := HBoxContainer.new()
+	color_row.name = "ColorRow"
+	color_row.add_theme_constant_override("separation", 8)
+	box.add_child(color_row)
+
+	var color_lbl := Label.new()
+	color_lbl.text = "颜色"
+	color_lbl.custom_minimum_size = Vector2(40, 0)
+	color_row.add_child(color_lbl)
+
+	var picker := ColorPickerButton.new()
+	picker.name = light_id.capitalize() + "Color"
+	picker.custom_minimum_size = Vector2(48, 22)
+	picker.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	color_row.add_child(picker)
+
+	# 第二行：能量 slider + 数值
+	var energy_row := HBoxContainer.new()
+	energy_row.name = "EnergyRow"
+	energy_row.add_theme_constant_override("separation", 8)
+	box.add_child(energy_row)
+
+	var energy_lbl := Label.new()
+	energy_lbl.text = "能量"
+	energy_lbl.custom_minimum_size = Vector2(40, 0)
+	energy_row.add_child(energy_lbl)
+
+	var slider := HSlider.new()
+	slider.name = light_id.capitalize() + "Energy"
+	slider.min_value = ENERGY_SLIDER_MIN
+	slider.max_value = ENERGY_SLIDER_MAX
+	slider.step = ENERGY_SLIDER_STEP
+	slider.value = 0.0
+	slider.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	energy_row.add_child(slider)
+
+	var value_lbl := Label.new()
+	value_lbl.name = light_id.capitalize() + "EnergyValue"
+	value_lbl.text = "0.00"
+	value_lbl.custom_minimum_size = Vector2(48, 0)
+	energy_row.add_child(value_lbl)
+
+	# 绑定到对应字段
+	match light_id:
+		"beam":
+			_beam_color = picker
+			_beam_energy_slider = slider
+			_beam_energy_label = value_lbl
+			picker.color_changed.connect(_on_beam_color_changed)
+			slider.value_changed.connect(_on_beam_energy_changed)
+		"spill":
+			_spill_color = picker
+			_spill_energy_slider = slider
+			_spill_energy_label = value_lbl
+			picker.color_changed.connect(_on_spill_color_changed)
+			slider.value_changed.connect(_on_spill_energy_changed)
+		"fill":
+			_fill_color = picker
+			_fill_energy_slider = slider
+			_fill_energy_label = value_lbl
+			picker.color_changed.connect(_on_fill_color_changed)
+			slider.value_changed.connect(_on_fill_energy_changed)
+
+# ---------- 事件回调：灯光 ----------
+
+func _on_beam_color_changed(color: Color) -> void:
+	if _flashlight != null:
+		_flashlight.set_beam_color(color)
+
+func _on_beam_energy_changed(value: float) -> void:
+	_beam_energy_label.text = "%.2f" % value
+	if _flashlight != null:
+		_flashlight.set_beam_energy(value)
+
+func _on_spill_color_changed(color: Color) -> void:
+	if _flashlight != null:
+		_flashlight.set_spill_color(color)
+
+func _on_spill_energy_changed(value: float) -> void:
+	_spill_energy_label.text = "%.2f" % value
+	if _flashlight != null:
+		_flashlight.set_spill_energy(value)
+
+func _on_fill_color_changed(color: Color) -> void:
+	if _flashlight != null:
+		_flashlight.set_front_fill_color(color)
+
+func _on_fill_energy_changed(value: float) -> void:
+	_fill_energy_label.text = "%.2f" % value
+	if _flashlight != null:
+		_flashlight.set_front_fill_energy(value)
+
+func _on_reset_pressed() -> void:
+	if _flashlight == null or not _has_initial:
+		return
+	# 写 export + 实时节点都覆盖一遍，避免模块倍率或关灯态残留
+	_flashlight.set_beam_color(_initial_beam_color)
+	_flashlight.set_beam_energy(_initial_beam_energy)
+	_flashlight.set_spill_color(_initial_spill_color)
+	_flashlight.set_spill_energy(_initial_spill_energy)
+	_flashlight.set_front_fill_color(_initial_fill_color)
+	_flashlight.set_front_fill_energy(_initial_fill_energy)
+	_sync_from_flashlight()
+
+# ---------- 事件回调：后处理 ----------
+
+func _on_aniso_strength_changed(value: float) -> void:
+	_postfx_aniso_strength_label.text = "%.2f" % value
+	if GraphicsSettingsManager != null:
+		GraphicsSettingsManager.set_debug_postfx("debug_postfx_anisotropy_strength", value)
+
+func _on_aniso_expansion_changed(value: float) -> void:
+	_postfx_aniso_expansion_label.text = "%.2f" % value
+	if GraphicsSettingsManager != null:
+		GraphicsSettingsManager.set_debug_postfx("debug_postfx_anisotropy_expansion", value)
+
+func _on_adjustment_toggle_changed(pressed: bool) -> void:
+	_refresh_postfx_controls_enabled()
+	if GraphicsSettingsManager != null:
+		GraphicsSettingsManager.set_debug_postfx("debug_postfx_adjustment_enabled", pressed)
+
+func _on_hue_changed(value: float) -> void:
+	_postfx_hue_label.text = "%.3f" % value
+	var overlay := _get_postfx_overlay()
+	if overlay != null:
+		overlay.set_hue_shift(value)
+
+func _on_brightness_changed(value: float) -> void:
+	_postfx_brightness_label.text = "%.2f" % value
+	if GraphicsSettingsManager != null:
+		GraphicsSettingsManager.set_debug_postfx("debug_postfx_adjustment_brightness", value)
+
+func _on_contrast_changed(value: float) -> void:
+	_postfx_contrast_label.text = "%.2f" % value
+	if GraphicsSettingsManager != null:
+		GraphicsSettingsManager.set_debug_postfx("debug_postfx_adjustment_contrast", value)
+
+func _on_saturation_changed(value: float) -> void:
+	_postfx_saturation_label.text = "%.2f" % value
+	if GraphicsSettingsManager != null:
+		GraphicsSettingsManager.set_debug_postfx("debug_postfx_adjustment_saturation", value)
+
+
+# ---------- 噪点 + 色相（走 PostfxOverlay）----------
+
+func _on_grain_toggle_changed(pressed: bool) -> void:
+	_refresh_postfx_controls_enabled()
+	var overlay := _get_postfx_overlay()
+	if overlay != null:
+		overlay.set_grain_enabled(pressed)
+
+func _on_grain_strength_changed(value: float) -> void:
+	_postfx_grain_strength_label.text = "%.2f" % value
+	var overlay := _get_postfx_overlay()
+	if overlay != null:
+		overlay.set_grain_strength(value)
+
+func _on_grain_size_changed(value: float) -> void:
+	_postfx_grain_size_label.text = "%.2f" % value
+	var overlay := _get_postfx_overlay()
+	if overlay != null:
+		overlay.set_grain_size(value)
+
+
+# ---------- 电视干扰 —----------
+
+func _on_tv_toggle_changed(pressed: bool) -> void:
+	_refresh_postfx_controls_enabled()
+	if GraphicsSettingsManager != null:
+		GraphicsSettingsManager.set_debug_postfx("debug_postfx_tv_distortion_enabled", pressed)
+		# 关闭电视干扰总开关时清零 4 个调试键，与噪点语义一致：
+		# “总开关 off → 画面上不应再有效果”。
+		if not pressed:
+			GraphicsSettingsManager.set_debug_postfx("debug_postfx_tv_glow_anisotropy", 0.0)
+			GraphicsSettingsManager.set_debug_postfx("debug_postfx_tv_glow_strength", 0.92)
+			GraphicsSettingsManager.set_debug_postfx("debug_postfx_tv_glow_hdr_threshold", 1.08)
+			GraphicsSettingsManager.set_debug_postfx("debug_postfx_tv_glow_hdr_scale", 1.65)
+
+func _on_tv_glow_aniso_changed(value: float) -> void:
+	_postfx_tv_glow_aniso_label.text = "%.2f" % value
+	if GraphicsSettingsManager != null:
+		GraphicsSettingsManager.set_debug_postfx("debug_postfx_tv_glow_anisotropy", value)
+
+func _on_tv_glow_strength_changed(value: float) -> void:
+	_postfx_tv_glow_strength_label.text = "%.2f" % value
+	if GraphicsSettingsManager != null:
+		GraphicsSettingsManager.set_debug_postfx("debug_postfx_tv_glow_strength", value)
+
+func _on_tv_glow_hdr_threshold_changed(value: float) -> void:
+	_postfx_tv_glow_hdr_threshold_label.text = "%.2f" % value
+	if GraphicsSettingsManager != null:
+		GraphicsSettingsManager.set_debug_postfx("debug_postfx_tv_glow_hdr_threshold", value)
+
+func _on_tv_glow_hdr_scale_changed(value: float) -> void:
+	_postfx_tv_glow_hdr_scale_label.text = "%.2f" % value
+	if GraphicsSettingsManager != null:
+		GraphicsSettingsManager.set_debug_postfx("debug_postfx_tv_glow_hdr_scale", value)
+
+
+# ---------- 99F 基地室内雾 ----------
+
+func _on_base_fog_density_changed(value: float) -> void:
+	_base_fog_density_label.text = "%.4f" % value
+	if GraphicsSettingsManager != null:
+		GraphicsSettingsManager.set_debug_postfx("debug_base_interior_fog_density", value)
+
+
+func _on_base_volumetric_fog_density_changed(value: float) -> void:
+	_base_volumetric_fog_density_label.text = "%.4f" % value
+	if GraphicsSettingsManager != null:
+		GraphicsSettingsManager.set_debug_postfx(
+			"debug_base_interior_volumetric_fog_density",
+			value
+		)
+
+func _on_clear_postfx_pressed() -> void:
+	if GraphicsSettingsManager != null:
+		GraphicsSettingsManager.clear_debug_postfx()
+	var overlay := _get_postfx_overlay()
+	if overlay != null:
+		overlay.reset_to_defaults()
+	_sync_postfx_from_manager()
+	# 把“已清空”本身也记住，否则下次启动会把刚清掉的调试值又恢复回来。
+	_schedule_persist()
+
+
+# ---------- 当前参数导出 ----------
+# 把后处理与基地雾气 tab 的全部控件值导出成一行 JSON，同时走三条通道：
+#   1) 控制台带 [POSTFX-EXPORT] 前缀（便于日志 grep）
+#   2) 系统剪贴板（Ctrl+V 即可粘贴）
+#   3) user://postfx_export.json（便于外部脚本直接读文件）
+# 以控件当前值为唯一真源 —— 面板显示什么就导出什么，不依赖
+# GraphicsSettingsManager 里“改过才有键”的稀疏覆盖表。
+const POSTFX_PERSIST_PATH := "user://postfx_tuning.json"
+
+
+func _collect_postfx_params() -> Dictionary:
+	return {
+		"debug_postfx_anisotropy_strength": _postfx_aniso_strength_slider.value,
+		"debug_postfx_anisotropy_expansion": _postfx_aniso_expansion_slider.value,
+		"debug_postfx_adjustment_enabled": _postfx_adjustment_toggle.button_pressed,
+		"debug_postfx_adjustment_brightness": _postfx_brightness_slider.value,
+		"debug_postfx_adjustment_contrast": _postfx_contrast_slider.value,
+		"debug_postfx_adjustment_saturation": _postfx_saturation_slider.value,
+		"debug_postfx_grain_enabled": _postfx_grain_toggle.button_pressed,
+		"debug_postfx_grain_strength": _postfx_grain_strength_slider.value,
+		"debug_postfx_grain_size": _postfx_grain_size_slider.value,
+		"debug_postfx_tv_distortion_enabled": _postfx_tv_toggle.button_pressed,
+		"debug_postfx_tv_glow_anisotropy": _postfx_tv_glow_aniso_slider.value,
+		"debug_postfx_tv_glow_strength": _postfx_tv_glow_strength_slider.value,
+		"debug_postfx_tv_glow_hdr_threshold": _postfx_tv_glow_hdr_threshold_slider.value,
+		"debug_postfx_tv_glow_hdr_scale": _postfx_tv_glow_hdr_scale_slider.value,
+		"debug_base_interior_fog_density": _base_fog_density_slider.value,
+		"debug_base_interior_volumetric_fog_density": _base_volumetric_fog_density_slider.value,
+		# 色相与噪点实际走 PostfxOverlay autoload 的全屏 shader，
+		# Environment 没有对应属性；这里沿用 overlay 自己的键名。
+		"hue_shift": _postfx_hue_slider.value,
+	}
+
+
+func _on_export_postfx_pressed() -> void:
+	# 参数本来就一直在自动落盘；这个按钮只是把“当前这一套”额外
+	# 打印到控制台并复制到剪贴板，便于贴给别人或存档。
+	var line := _write_persist_file()
+	print("[POSTFX-EXPORT] %s" % line)
+	DisplayServer.clipboard_set(line)
+	_status_label.text = "调试参数已导出 · 剪贴板 + 日志 + %s" % POSTFX_PERSIST_PATH
+
+# ---------- 后处理参数自动持久化 ----------
+# 面板里任何后处理改动都会在静默 PERSIST_DEBOUNCE_SECONDS 后写入
+# user://postfx_tuning.json；下次启动 _ready() 时自动读回并立即生效 ——
+# 也就是“调完不用再点导出，下次进游戏画面还是这一套”。
+# 导出按钮仍然保留：它额外负责打印到控制台 + 复制到剪贴板，便于把这一套给别人。
+#
+# 范围含后处理与基地室内雾；手电三盏不属于该配置，不参与。
+
+const PERSIST_DEBOUNCE_SECONDS := 0.4
+
+var _persist_timer: Timer
+
+
+func _setup_postfx_persist() -> void:
+	_persist_timer = Timer.new()
+	_persist_timer.name = "PostfxPersistTimer"
+	_persist_timer.one_shot = true
+	_persist_timer.wait_time = PERSIST_DEBOUNCE_SECONDS
+	_persist_timer.timeout.connect(_on_persist_timeout)
+	add_child(_persist_timer)
+	# 给所有后处理控件额外接一根“改动即排程保存”的线，原有回调不受影响。
+	# _sync_postfx_from_manager() 回填控件时用 set_block_signals(true)，
+	# 因此程序性同步不会误触发保存。
+	for slider in [
+		_postfx_aniso_strength_slider,
+		_postfx_aniso_expansion_slider,
+		_postfx_hue_slider,
+		_postfx_brightness_slider,
+		_postfx_contrast_slider,
+		_postfx_saturation_slider,
+		_postfx_grain_strength_slider,
+		_postfx_grain_size_slider,
+		_postfx_tv_glow_aniso_slider,
+		_postfx_tv_glow_strength_slider,
+		_postfx_tv_glow_hdr_threshold_slider,
+		_postfx_tv_glow_hdr_scale_slider,
+		_base_fog_density_slider,
+		_base_volumetric_fog_density_slider,
+	]:
+		(slider as HSlider).value_changed.connect(_on_postfx_param_touched)
+	for toggle in [_postfx_adjustment_toggle, _postfx_grain_toggle, _postfx_tv_toggle]:
+		(toggle as CheckButton).toggled.connect(_on_postfx_param_touched)
+
+
+func _on_postfx_param_touched(_value: Variant = null) -> void:
+	_schedule_persist()
+
+
+func _schedule_persist() -> void:
+	if _persist_timer == null:
+		return
+	# one_shot Timer 每次 start() 都重置计时 —— 拖滑条时天然防抖，松手后才落盘。
+	_persist_timer.start()
+
+
+func _on_persist_timeout() -> void:
+	_write_persist_file()
+
+
+# 退出前把尚未落盘的改动补写一次，避免“调完立刻关游戏”丢参数。
+func _exit_tree() -> void:
+	if _persist_timer != null and not _persist_timer.is_stopped():
+		_write_persist_file()
+
+
+func _write_persist_file() -> String:
+	var line := JSON.stringify(_collect_postfx_params())
+	var file := FileAccess.open(POSTFX_PERSIST_PATH, FileAccess.WRITE)
+	if file != null:
+		# 单独一行 + 结尾换行，便于外部脚本按行读取。
+		file.store_string(line + "\n")
+		file.close()
+	return line
+
+
+func _load_persisted_postfx() -> Dictionary:
+	# 主路径 = 当前口径；user://postfx_export.json 是改名前的旧落点，保留兼容读取。
+	for path in [POSTFX_PERSIST_PATH, "user://postfx_export.json"]:
+		if not FileAccess.file_exists(path):
+			continue
+		var file := FileAccess.open(path, FileAccess.READ)
+		if file == null:
+			continue
+		var text := file.get_as_text().strip_edges()
+		file.close()
+		var parsed: Variant = JSON.parse_string(text)
+		if parsed is Dictionary:
+			return parsed as Dictionary
+	return {}
+
+
+func _apply_persisted_postfx() -> void:
+	var data := _load_persisted_postfx()
+	if data.is_empty():
+		return
+	# 一次性写整组，绕开“逐控件设值时信号先后顺序”的坑：
+	# Environment 侧走 apply_debug_postfx（非 DEBUG_POSTFX_KEYS 的键自动忽略，
+	# 例如 hue_shift），overlay 侧走 apply_grain（噪点 + 色相）。
+	if GraphicsSettingsManager != null:
+		GraphicsSettingsManager.apply_debug_postfx(data)
+	var overlay := _get_postfx_overlay()
+	if overlay != null:
+		overlay.apply_grain(
+			bool(data.get("debug_postfx_grain_enabled", false)),
+			float(data.get("debug_postfx_grain_strength", 0.0)),
+			float(data.get("debug_postfx_grain_size", 1.0)),
+			float(data.get("hue_shift", 0.0))
+		)
+	_sync_postfx_from_manager()

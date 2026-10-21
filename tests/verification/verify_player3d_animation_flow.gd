@@ -1,0 +1,119 @@
+extends Node
+
+const GALLERY_SCENE: PackedScene = preload("res://scenes/Player3DStateGallery.tscn")
+
+
+func _ready() -> void:
+	var failures: Array[String] = []
+	var gallery := GALLERY_SCENE.instantiate() as Player3DStateGallery
+	add_child(gallery)
+	await get_tree().process_frame
+	await get_tree().process_frame
+	gallery.set_physics_process(false)
+	gallery.player.set_physics_process(false)
+	gallery.player.avatar.set_process(false)
+
+	gallery.player.avatar.call("_process", 0.10)
+	var snapshot := gallery.player.avatar.get_component_snapshot()
+	if str(snapshot.get("assembly_version", "")) != "v021":
+		failures.append("Bunny v021 is not the active Player3D asset")
+	if (
+		str(snapshot.get("animation_driver", "")) != "blender_v021_only"
+		or bool(snapshot.get("legacy_procedural_motion_enabled", true))
+	):
+		failures.append("Bunny v021 still enables the legacy procedural player animation driver")
+	if (
+		float(snapshot.get("left_hand_ring_to_joint_global_distance", 999.0)) > 0.001
+		or float(snapshot.get("right_hand_ring_to_joint_global_distance", 999.0)) > 0.001
+	):
+		failures.append("HandJointL/R are not centered on their cuff rings")
+	if (
+		float(snapshot.get("ear_l_root_to_socket_global_distance", 999.0)) > 0.001
+		or float(snapshot.get("ear_r_root_to_socket_global_distance", 999.0)) > 0.001
+	):
+		failures.append("EarSocketL/R are not centered on the ear-base contact points")
+	if (
+		gallery.player.get_state_machine_state() != "idle"
+		or not bool(snapshot.get("idle_animation_active", false))
+		or not bool(snapshot.get("idle_state_machine_owned", false))
+	):
+		failures.append("The current avatar idle state does not own the standing animation")
+	# 出厂枪已由豌豆手枪换成初始步枪（bp_starter_rifle），因此「手枪」不再等于「默认枪」。
+	# 本段验的是手枪专用的单手持枪姿势，必须显式装备后再取样。
+	if not gallery.player.equip_weapon("bp_pistol", "mod_bullet_standard"):
+		failures.append("Pistol could not be equipped for the one-hand sidearm grip check")
+	else:
+		gallery.player.avatar.call("_process", 0.10)
+		snapshot = gallery.player.avatar.get_component_snapshot()
+	if (
+		not bool(snapshot.get("weapon_grip_pose_active", false))
+		or str(snapshot.get("weapon_pose_state", "")) != "sidearm_hold"
+		or int(snapshot.get("active_grip_hand_count", 0)) != 1
+			or float(snapshot.get("hand_r_to_socket_global_distance", 999.0)) > 0.189
+			or float(snapshot.get("hand_l_to_socket_global_distance", 0.0)) < 0.180
+	):
+		failures.append("Pistol does not keep its one-hand right-side grip and free left hand")
+	if not gallery.player.equip_weapon("bp_rifle", "mod_bullet_standard"):
+		failures.append("Rifle could not be equipped for the two-hand grip check")
+	else:
+		gallery.player.avatar.call("_process", 0.10)
+		snapshot = gallery.player.avatar.get_component_snapshot()
+		if (
+			str(snapshot.get("weapon_pose_state", "")) != "longgun_hold"
+			or int(snapshot.get("active_grip_hand_count", 0)) != 2
+			or str(snapshot.get("weapon_animation_fallback", "")) != "none"
+			or str(snapshot.get("authored_motion_clip", "")) != "longgun_idle"
+			or float(snapshot.get("right_hand_palm_to_socket_global_distance", 999.0)) > 0.001
+		):
+			failures.append("Rifle does not use its authored two-hand carry idle")
+		gallery.run_player_action("moving")
+		gallery.player.aim_yaw = 0.0
+		gallery.player.avatar.visual_root.rotation.y = 0.0
+		gallery.player.velocity = Vector3(2.0, 0.0, 0.0)
+		gallery.player.avatar.call("_process", 0.20)
+		snapshot = gallery.player.avatar.get_component_snapshot()
+		if str(snapshot.get("authored_motion_clip", "")) != "longgun_walking_strafe_right":
+			failures.append("Slow longgun locomotion does not select its right strafe")
+		gallery.player.velocity = Vector3(5.0, 0.0, 0.0)
+		gallery.player.avatar.call("_process", 0.20)
+		snapshot = gallery.player.avatar.get_component_snapshot()
+		if str(snapshot.get("authored_motion_clip", "")) != "longgun_moving_strafe_right":
+			failures.append("Normal-speed longgun locomotion does not select its right strafe")
+
+	gallery.run_player_action("dashing")
+	# v0.1 的翻滚周期为位移周期的 1.3 倍；90 ms 才进入约 34% 的收腹关键帧。
+	gallery.player.avatar.call("_process", 0.09)
+	snapshot = gallery.player.avatar.get_component_snapshot()
+	var dash_head_rotation := snapshot.get("head_rotation", Vector3.ZERO) as Vector3
+	if (
+		not bool(snapshot.get("dash_roll_active", false))
+		or float(snapshot.get("dash_roll_progress", 0.0)) < 0.30
+		or str(snapshot.get("authored_motion_clip", "")) != "dashing"
+		or dash_head_rotation.length() < 0.45
+	):
+		failures.append("Dash does not play the authored Blender roll key pose")
+
+	gallery.run_player_action("hurt")
+	gallery.player.avatar.call("_process", 0.06)
+	snapshot = gallery.player.avatar.get_component_snapshot()
+	var head_rotation := snapshot.get("head_rotation", Vector3.ZERO) as Vector3
+	var foot_l_rotation := snapshot.get("foot_l_rotation", Vector3.ZERO) as Vector3
+	var foot_r_rotation := snapshot.get("foot_r_rotation", Vector3.ZERO) as Vector3
+	if (
+		not bool(snapshot.get("hurt_keyframe_active", false))
+		or float(snapshot.get("hurt_animation_progress", 0.0)) <= 0.10
+		or str(snapshot.get("authored_motion_clip", "")) != "hurt"
+		or head_rotation.length() < 0.25
+		or maxf(foot_l_rotation.length(), foot_r_rotation.length()) < 0.20
+	):
+		failures.append("Hurt animation lacks the squash, head whip, and foot recoil key pose")
+
+	gallery.queue_free()
+	await get_tree().process_frame
+	if failures.is_empty():
+		print("BUNNY_V021_ANIMATION_FLOW_OK: Blender-only driver, authored grips, dash, and hurt key poses pass")
+		get_tree().quit(0)
+		return
+	for failure in failures:
+		push_error(failure)
+	get_tree().quit(1)

@@ -1,0 +1,82 @@
+[gd_scene load_steps=6 format=3]
+
+[ext_resource type="PackedScene" path="res://assets/art/props/base_world_3d/components/base99_radio/prp_base99_radio_visual_top3d.glb" id="1_visual"]
+[ext_resource type="Script" path="res://src/base3d/Base99Radio3D.gd" id="2_radio"]
+[ext_resource type="PackedScene" path="res://assets/art/vfx/environment_3d/radio_music_notes/vfx_radio_music_notes_root_top3d.tscn" id="3_notes"]
+
+[sub_resource type="BoxShape3D" id="ShapeRadioWorld"]
+size = Vector3(0.828, 0.822, 0.456)
+
+[sub_resource type="BoxShape3D" id="ShapeRadioHit"]
+size = Vector3(0.868, 0.862, 0.496)
+
+[node name="ItemRoot" type="Node3D" groups=["interaction_provider_3d", "base99_radio_3d"]]
+script = ExtResource("2_radio")
+metadata/asset_id = "PRP-BASE99-RADIO-3D"
+metadata/asset_version = "v005.1"
+metadata/model_version = "v005"
+metadata/asset_name_cn = "99F阁楼床边桌独立收音机"
+metadata/asset_category = "decor_prop"
+metadata/category_display = "场景可交互道具"
+metadata/forward_axis = "-Z"
+metadata/base_plane = "Y=0"
+metadata/bounds_size_m = Vector3(0.828, 0.456, 0.822)
+metadata/model_sha256 = "0b2cf2fcba9832ce8b37b62185e016f294ee834555439b71b11c543e0244851d"
+metadata/model_faces = 599
+metadata/model_triangles = 1190
+metadata/prefab_version = "v005.1"
+metadata/audio_spatial_contract = "single AudioStreamPlayer3D; Music bus; unit_size=18.0m; max_distance=78.0m; attenuation_model=inverse_square; listener inside Rect2(-50,-35,100,80) full source gain; outside edge -18dB then -4dB/m, floor -42dB; no duplicate playback"
+metadata/base99_boundary_contract = "TowerFloorStage3D.TOWER_SHELL_WORLD_RECT = Rect2(-50,-35,100,80)"
+metadata/audio_runtime_spec_version = "v001"
+metadata/audio_max_distance_m = 78.0
+metadata/music_notes_asset_id = "VFX-RADIO-MUSIC-NOTES-3D"
+metadata/music_notes_policy = "radio child; real audio playing; A/B continuous; off/floor off/exit immediate clear; visual only"
+metadata/source_blend = "assets/art/props/base_world_3d/source/base99_radio/prp_base99_radio_source_v005.blend"
+metadata/optimized_blend = "assets/art/props/base_world_3d/source/base99_radio/export/v005/prp_base99_radio_optimized_v005.blend"
+metadata/source_sha256 = "d707298407d52dd5ce36c7f6de3fdef71dcfbfdac986cadf6d250318a3628a12"
+metadata/optimized_sha256 = "448f30da74d0e118a032842e9eed2d49e8befcfcce24cb6f386547011b492ec1"
+metadata/status_light_contract = "ItemRoot/Visual/StatusLight；顶面偏前侧12边低模凸帽；直径0.20m；off红常亮，A/B绿常亮；无billboard/UI/bloom"
+metadata/collision_policy = "独立道具碰撞盒与点击区域；由道具Prefab自持"
+metadata/runtime_remap = "shared_facility_palette_by_material_role"
+metadata/music_policy = "local AudioStreamPlayer3D on Music bus; fixed per-state looping stream"
+
+[node name="Visual" parent="." instance=ExtResource("1_visual")]
+
+[node name="MusicNotes" parent="." instance=ExtResource("3_notes")]
+position = Vector3(0, 1.42, 0)
+
+[node name="WorldCollision" type="StaticBody3D" parent="."]
+collision_layer = 1
+collision_mask = 1
+
+[node name="Shape" type="CollisionShape3D" parent="WorldCollision"]
+position = Vector3(0, 0.411, 0)
+shape = SubResource("ShapeRadioWorld")
+
+[node name="InteractionHitArea" type="Area3D" parent="."]
+collision_layer = 2
+collision_mask = 0
+monitoring = true
+monitorable = true
+
+[node name="Shape" type="CollisionShape3D" parent="InteractionHitArea"]
+position = Vector3(0, 0.411, 0)
+shape = SubResource("ShapeRadioHit")
+
+[node name="AudioStreamPlayer3D" type="AudioStreamPlayer3D" parent="."]
+position = Vector3(0, 0.411, 0)
+bus = &"Music"
+autoplay = false
+unit_size = 18.0
+max_distance = 78.0
+attenuation_model = 1
+
+[node name="Tooltip" type="Label3D" parent="."]
+position = Vector3(0, 1.05, 0)
+text = "左键 / E · 播放收音机 A"
+font_size = 32
+outline_size = 8
+pixel_size = 0.0018
+modulate = Color(0.72, 0.95, 1, 1)
+visible = false
+metadata/tooltip_contract = "显示下一步操作；不改变全局输入映射"

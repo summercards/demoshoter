@@ -1,0 +1,518 @@
+## 探针：远征01 通道桥房「多层几何」（下沉坑 + 跨桥）消费验证。
+##
+## 为什么需要它：多层几何是**区块组合器装不下的一层**（`build_block()` 的输入契约是
+## 「轴对齐矩形 + 四面墙 + 门位 + 单水平面」），所以走 `FloorPlanGenerator` 的第 6 环
+## 独立通路，且它**不参与 lane 归属模型**（不占 lane、不进 wall_lanes）——
+## 也就是说「区块级探针」天生看不到它。没有本探针，这层几何写错了整层照样绿。
+##
+## ⚠ **两种取向都必须测**：桥房只有**一张模板** `bridge_60x50`，取向是同一张模板的两种旋转 ——
+## `0°` 本体 30×60 工字型（桥沿 z 跨）／`90°` 转置（桥沿 x 跨，占位 60×30）。
+## 生成器按连接方向自动选姿态 ⇒ 只测本体等于漏掉一半的实例。
+## 历史缺陷（本探针扩到两取向时抓出）：坑壁开口与桥侧护栏曾按「桥沿 x 跨」写死 ——
+## 转置姿态下南北壁不留口（玩家上不了桥）、东西壁被整片删掉、护栏横在桥两端堵死桥。
+##
+## 断言分两段：
+##   A. **纯规划级**（`_bridge_multi_level_plan()`，两种取向各跑一遍）：坑/桥矩形、深度、
+##      三层件数、格线对齐、墙底标高、纵向拉伸比、桥口开在**桥实际贴到的那两条坑沿**上、
+##      护栏沿**桥长轴**排、朝向合法性、确定性、非桥房返回空。
+##   B. **真实生成路径**（`_generate_constrained_floor()` → 房记录）：正式 v010 房型清单
+##      真进了 `authored_layout_instances`、角色数量符合 48 floor_tile + 158 room_type_component、
+##      每个 component_id 都能在运行时注册表里解析成 prefab，并配对验收 0°/180° 全局旋转。
+##
+## 「坑区一律保留承重、玩家无跳跃」是本环的设计前提（见 `FloorPlanGenerator` 第 6 环
+## 头注释），因此承重归 `TowerFloorStage3D._build_support()` 不动 —— 本探针不测承重。
+extends Node
+
+const GENERATOR := preload("res://src/map/FloorPlanGenerator.gd")
+const LOADER := preload("res://src/map/LevelPlanLoader.gd")
+const VALIDATOR := preload("res://src/map/LevelPlanValidator.gd")
+const ROOM := preload("res://src/world3d/DungeonRoom3D.gd")
+
+const LEVEL := "expedition_01"
+## 桥房唯一的模板 id。两种取向**不是**两个 id，而是同一张模板的两种旋转
+## （业主裁定 2026-09-25「不要两批代号」，见 05.2 §3.4/§3.6）。
+const BRIDGE_TEMPLATE := "bridge_60x50"
+## 取向：0° ＝ 本体 30×60 工字型（桥沿 z 跨）／90° ＝ 转置（桥沿 x 跨，占位 60×30）。
+const BRIDGE_ROTATION_NATIVE := 0
+const BRIDGE_ROTATION_POSE := 90
+const GRID := 5.0
+## 本体 30×60（工字型）：下沉区 = 中间整段 30×30 于 x∈[-15,15] z∈[-15,15]；
+## 跨桥 10×30 于 x∈[-5,5] z∈[-15,15]（沿 z 跨、把正方形坑分成东西两半）。
+const NATIVE_SIZE := Vector2(30.0, 60.0)
+const NATIVE_PIT := Rect2(-15.0, -15.0, 30.0, 30.0)
+const NATIVE_BRIDGE := Rect2(-5.0, -15.0, 10.0, 30.0)
+## 转置姿态 60×30：坑仍 30×30 于 x∈[-15,15] z∈[-15,15]；桥 30×10 于 x∈[-15,15] z∈[-5,5]。
+const POSE_SIZE := Vector2(60.0, 30.0)
+const POSE_PIT := Rect2(-15.0, -15.0, 30.0, 30.0)
+const POSE_BRIDGE := Rect2(-15.0, -5.0, 30.0, 10.0)
+## 深度由模板 `sunken_pit.depth_m` 推出（两取向同）。
+const EXPECTED_DEPTH := 12.0
+## 坑壁 + 护栏件数（**两种取向同数**：正方形坑周长 120m 同、桥长 30m 同）：
+## ① 坑壁 20 件（四周各 6 格铺满 = 24，其中 4 格让给桥口）＋ ② 桥侧护栏 12 件（沿桥长轴 6 格 × 2 面）。
+const EXPECTED_PIT_WALLS := 32
+## 坑底地砖：两取向的坑都是 6×6 = 36 格。
+const EXPECTED_PIT_TILES := 36
+## 坑区 36 格里有桥面那条 12 格保留原砖 ⇒ 上层地砖比满铺少 24 块（两取向同）。
+const EXPECTED_PLATFORM_TILES_DROPPED := 24
+## 一件标准墙 11.9m 拉到「坑深 12m + 地面护栏 0.8m」。
+const EXPECTED_WALL_SCALE_Y := 12.8 / 11.9
+const EPS := 0.01
+## 真实生成路径的种子数：正式房型已钉死；这里用于重复验证清单与 0/180 配对。
+const RUNTIME_SEEDS := 24
+## 正式 v010 房型清单：48 块 floor_tile + 158 件 room_type_component = 206 件，
+## 另有 36 件正式 solid_wall，共 242 件；其中 room_type_component 包含 36 块坑底砖、
+## 8 块坑端壁、12 块坑侧壁与 2 件桥护栏。旧 multi_level_component 必须为 0。
+const EXPECTED_FORMAL_INSTANCES := 242
+const EXPECTED_FORMAL_FLOOR_TILES := 48
+const EXPECTED_FORMAL_ROOM_TYPE_COMPONENTS := 158
+const EXPECTED_FORMAL_SOLID_WALLS := 36
+const LEGACY_MULTI_LEVEL_ROLE := "multi_level_component"
+
+var failures: Array[String] = []
+var checks := 0
+
+
+func _check(condition: bool, label: String) -> void:
+	checks += 1
+	if not condition:
+		failures.append(label)
+
+
+func _approx(a: float, b: float, tol := EPS) -> bool:
+	return absf(a - b) <= tol
+
+
+## 沿墙坐标必须落在 5m 格心（全局 `5k + 2.5`）。
+func _on_lane_lattice(value: float) -> bool:
+	return absf(fposmod(value - 2.5, GRID)) <= EPS
+
+
+func _ready() -> void:
+	print("---- 远征01 通道桥正式 v010 探针（规划单测 0°/90°；正式清单配对 0°/180°）----")
+	var templates := LOADER.load_room_templates(LEVEL)
+	if templates.is_empty():
+		print("PROBE_FAIL: room_templates 加载失败")
+		get_tree().quit(1)
+		return
+	if not templates.has(BRIDGE_TEMPLATE):
+		print("PROBE_FAIL: 缺模板 %s" % BRIDGE_TEMPLATE)
+		get_tree().quit(1)
+		return
+	# 反向断言：转置姿态**不允许**是另一个模板 —— 存在即说明有人又建了一族代号。
+	if templates.has("bridge_50x60"):
+		print("PROBE_FAIL: 模板目录里出现了 bridge_50x60 —— 转置姿态必须用旋转表达，不得另建 id")
+		get_tree().quit(1)
+		return
+
+	_check_plan(templates, NATIVE_SIZE, "本体0°", NATIVE_PIT, NATIVE_BRIDGE)
+	_check_plan(templates, POSE_SIZE, "转置90°", POSE_PIT, POSE_BRIDGE)
+	_check_non_bridge(templates)
+	_check_runtime_path(templates)
+
+	print("checks=%d failures=%d" % [checks, failures.size()])
+	if failures.is_empty():
+		print("BRIDGE_MULTI_LEVEL_OK checks=%d" % checks)
+		get_tree().quit(0)
+		return
+	for failure in failures:
+		print("FAIL  %s" % failure)
+	print("PROBE_FAIL")
+	get_tree().quit(1)
+
+
+## 桥口开在哪两条坑沿上：由「桥矩形哪两条边与坑沿贴合」解出，不写死轴向。
+## 返回 `{"zs": [沿 x 走向的开口坑沿（z 常量）], "xs": [沿 z 走向的开口坑沿（x 常量）]}`。
+func _open_edges(pit: Rect2, bridge: Rect2) -> Dictionary:
+	var zs: Array[float] = []
+	var xs: Array[float] = []
+	if _approx(bridge.position.y, pit.position.y):
+		zs.append(pit.position.y)
+	if _approx(bridge.position.y + bridge.size.y, pit.position.y + pit.size.y):
+		zs.append(pit.position.y + pit.size.y)
+	if _approx(bridge.position.x, pit.position.x):
+		xs.append(pit.position.x)
+	if _approx(bridge.position.x + bridge.size.x, pit.position.x + pit.size.x):
+		xs.append(pit.position.x + pit.size.x)
+	return {"zs": zs, "xs": xs}
+
+
+## —— A. 纯规划级（一种取向跑一遍）——
+##
+## `label` 是取向标签（"本体0°/转置90°"）；函数体沿用局部名 `template_id` 书写文案，
+## 两种取向共用同一张模板，只有 `size` 与 `rotation_deg` 不同。
+func _check_plan(
+	templates: Dictionary,
+	room_size: Vector2,
+	label: String,
+	expected_pit: Rect2,
+	expected_bridge: Rect2
+) -> void:
+	var template_id := label
+	var room := {
+		"key": "bridge_%s" % label,
+		"template_id": BRIDGE_TEMPLATE,
+		"size": room_size,
+		"center": Vector2.ZERO,
+		"rotation_deg": float(
+			BRIDGE_ROTATION_NATIVE if room_size.x < room_size.y else BRIDGE_ROTATION_POSE
+		),
+	}
+	var plan := GENERATOR._bridge_multi_level_plan(room, templates)
+	_check(not plan.is_empty(), "① %s：桥房应产出多层几何规划" % template_id)
+	if plan.is_empty():
+		return
+
+	var pit := plan.get("pit_rect", Rect2()) as Rect2
+	_check(
+		pit.position.is_equal_approx(expected_pit.position)
+		and pit.size.is_equal_approx(expected_pit.size),
+		"② %s：坑矩形应为 %s，实得 %s" % [template_id, str(expected_pit), str(pit)]
+	)
+	var span := plan.get("bridge_rect", Rect2()) as Rect2
+	_check(
+		span.position.is_equal_approx(expected_bridge.position)
+		and span.size.is_equal_approx(expected_bridge.size),
+		"③ %s：桥矩形应为 %s，实得 %s" % [template_id, str(expected_bridge), str(span)]
+	)
+	_check(
+		_approx(float(plan.get("depth_m", 0.0)), EXPECTED_DEPTH),
+		"④ %s：坑深应为 12m（一整层层高），实得 %s"
+		% [template_id, str(plan.get("depth_m", 0.0))]
+	)
+
+	var instances := plan.get("instances", []) as Array
+	var wall_count := 0
+	var tile_count := 0
+	var role_ok := true
+	var part_ok := true
+	var wall_y_ok := true
+	var wall_scale_ok := true
+	var wall_lattice_ok := true
+	var wall_face_ok := true
+	var wall_axis_ok := true
+	var tile_y_ok := true
+	var tile_lattice_ok := true
+	var bridge_mouth_open := true
+	# 坑壁四侧都必须有件（朝向集合 = 四个方向都用上）。
+	var wall_faces: Dictionary = {}
+	# 开口坑沿（桥实际贴到的那两条）：这两条坑沿上、桥跨区间内的格必须**没有**坑壁件。
+	var open_z := (_open_edges(expected_pit, expected_bridge)["zs"] as Array)
+	var open_x := (_open_edges(expected_pit, expected_bridge)["xs"] as Array)
+	# 坑沿与桥长边的常量轴取值集合（坑壁只许坐在这些位置上）。
+	var axis_z := [expected_pit.position.y, expected_pit.position.y + expected_pit.size.y,
+		expected_bridge.position.y, expected_bridge.position.y + expected_bridge.size.y]
+	var axis_x := [expected_pit.position.x, expected_pit.position.x + expected_pit.size.x,
+		expected_bridge.position.x, expected_bridge.position.x + expected_bridge.size.x]
+	for value in instances:
+		var instance := value as Dictionary
+		if str(instance.get("slot_role", "")) != GENERATOR.MULTI_LEVEL_SLOT_ROLE:
+			role_ok = false
+		var part := str(instance.get("part", ""))
+		var local := instance.get("position", Vector3.ZERO) as Vector3
+		var rotation := float(instance.get("rotation_y_deg", 0.0))
+		match part:
+			GENERATOR.MULTI_LEVEL_PART_PIT_WALL:
+				wall_count += 1
+				wall_faces[rotation] = int(wall_faces.get(rotation, 0)) + 1
+				if not _approx(local.y, -EXPECTED_DEPTH):
+					wall_y_ok = false
+				if not _approx(float(instance.get("scale_y", 0.0)), EXPECTED_WALL_SCALE_Y):
+					wall_scale_ok = false
+				# 朝向只能是四个正交墙向之一（0/180 = 沿 x 铺；±90 = 沿 z 铺）。
+				if not (
+					_approx(rotation, 0.0)
+					or _approx(rotation, 180.0)
+					or _approx(rotation, 90.0)
+					or _approx(rotation, -90.0)
+				):
+					wall_face_ok = false
+				var along_x := _approx(rotation, 0.0) or _approx(rotation, 180.0)
+				if along_x:
+					# 沿 x 铺：常量轴是 z（坑南/北壁 或 桥长边），沿墙坐标是 x。
+					if not _in_list(local.z, axis_z):
+						wall_axis_ok = false
+					if not _on_lane_lattice(local.x):
+						wall_lattice_ok = false
+					# 桥口：开口坑沿上、桥跨 x 区间内不许有坑壁件。
+					if _in_list(local.z, open_z) and _inside(local.x, expected_bridge.position.x, expected_bridge.position.x + expected_bridge.size.x):
+						bridge_mouth_open = false
+				else:
+					# 沿 z 铺：常量轴是 x（坑东/西壁 或 桥长边），沿墙坐标是 z。
+					if not _in_list(local.x, axis_x):
+						wall_axis_ok = false
+					if not _on_lane_lattice(local.z):
+						wall_lattice_ok = false
+					if _in_list(local.x, open_x) and _inside(local.z, expected_bridge.position.y, expected_bridge.position.y + expected_bridge.size.y):
+						bridge_mouth_open = false
+			GENERATOR.MULTI_LEVEL_PART_PIT_FLOOR_TILE:
+				tile_count += 1
+				if not _approx(local.y, -EXPECTED_DEPTH):
+					tile_y_ok = false
+				if not (_on_lane_lattice(local.x) and _on_lane_lattice(local.z)):
+					tile_lattice_ok = false
+			_:
+				part_ok = false
+
+	_check(role_ok, "⑤ %s：多层件 slot_role 必须一律 %s" % [template_id, GENERATOR.MULTI_LEVEL_SLOT_ROLE])
+	_check(part_ok, "⑥ %s：多层件 part 只能是 pit_wall / pit_floor_tile" % template_id)
+	_check(
+		wall_count == EXPECTED_PIT_WALLS,
+		"⑦ %s：坑壁+护栏应为 %d 件，实得 %d" % [template_id, EXPECTED_PIT_WALLS, wall_count]
+	)
+	_check(
+		tile_count == EXPECTED_PIT_TILES,
+		"⑧ %s：坑底砖应为 %d 块（满铺），实得 %d" % [template_id, EXPECTED_PIT_TILES, tile_count]
+	)
+	_check(wall_y_ok, "⑨ %s：坑壁墙底应落在坑底标高 −12m" % template_id)
+	_check(wall_scale_ok, "⑩ %s：坑壁应纵向拉伸到 12.8/11.9（坑深 12 + 地面护栏 0.8）" % template_id)
+	_check(wall_lattice_ok, "⑪ %s：坑壁沿墙坐标必须落在 5m 格心" % template_id)
+	_check(tile_lattice_ok, "⑫ %s：坑底砖中心必须落在 5m 格心" % template_id)
+	_check(
+		wall_axis_ok,
+		"⑬ %s：坑壁常量轴必须是坑沿（%s / %s）或桥长边" % [template_id, str(axis_x), str(axis_z)]
+	)
+	_check(wall_face_ok, "⑭ %s：坑壁朝向必须是四正交墙向之一" % template_id)
+	_check(
+		bridge_mouth_open,
+		"⑮ %s：开口坑沿（z=%s / x=%s）在桥跨那一段必须留口（否则上不了桥）"
+		% [template_id, str(open_z), str(open_x)]
+	)
+	_check(
+		wall_faces.size() == 4,
+		"⑯ %s：坑壁四侧朝向都要用到（实得 %s）" % [template_id, str(wall_faces.keys())]
+	)
+	# ⑰ 桥侧护栏必须沿**桥的长轴**排：本体沿 x（常量轴 z = 桥两长边），转置姿态沿 z（常量轴 x = 桥两长边）。
+	var rail_axis_ok := true
+	for value in instances:
+		var instance := value as Dictionary
+		if str(instance.get("name", "")).begins_with("PIT_BRIDGE_"):
+			var local := instance.get("position", Vector3.ZERO) as Vector3
+			if expected_bridge.size.x >= expected_bridge.size.y:
+				if not (
+					_approx(local.z, expected_bridge.position.y)
+					or _approx(local.z, expected_bridge.position.y + expected_bridge.size.y)
+				):
+					rail_axis_ok = false
+			elif not (
+				_approx(local.x, expected_bridge.position.x)
+				or _approx(local.x, expected_bridge.position.x + expected_bridge.size.x)
+			):
+				rail_axis_ok = false
+	_check(rail_axis_ok, "⑰ %s：桥侧护栏必须坐在桥的两条长边上（沿桥长轴排）" % template_id)
+
+	# ⑱ 确定性：同输入两次规划结果逐字段一致（探针与运行时必须同源可复现）。
+	var second := GENERATOR._bridge_multi_level_plan(room, templates)
+	_check(
+		str(second.get("pit_rect", Rect2())) == str(pit)
+		and (second.get("instances", []) as Array).size() == instances.size()
+		and str(second.get("instances", [])) == str(instances),
+		"⑱ %s：同输入两次规划结果必须完全一致" % template_id
+	)
+
+
+## ⑲ 非通道桥模板不得产出多层几何（否则「整层多出一圈坑」会静默发生）。
+func _check_non_bridge(templates: Dictionary) -> void:
+	var plain := {
+		"key": "branch_04",
+		"template_id": "std_25x25",
+		"size": Vector2(25.0, 25.0),
+		"center": Vector2.ZERO,
+	}
+	_check(
+		GENERATOR._bridge_multi_level_plan(plain, templates).is_empty(),
+		"⑲ 非通道桥房型不得产出多层几何"
+	)
+
+
+## 严格落在开区间内（与生成器的桥口判据同口径：端点那一格不算）。
+func _inside(value: float, low: float, high: float) -> bool:
+	return value > low + EPS and value < high - EPS
+
+
+func _in_list(value: float, values: Array) -> bool:
+	for candidate in values:
+		if _approx(value, float(candidate)):
+			return true
+	return false
+
+
+## —— B. 真实生成路径（房记录级）——
+func _check_runtime_path(templates: Dictionary) -> void:
+	var level_plan := LOADER.load_level_plan(LEVEL)
+	if level_plan.is_empty():
+		_check(false, "⑳ level_plan 加载失败")
+		return
+	var policy := (level_plan.get("generation_policy", {}) as Dictionary).duplicate(true)
+	_check(
+		bool(policy.get("pin_content_templates", false)),
+		"⑳ level_plan 必须 pin_content_templates=true，正式 v010 房型清单才能稳定验收"
+	)
+	var normalized := LOADER.normalize_floor(LEVEL, 0)
+	var rooms_by_pose := {BRIDGE_ROTATION_NATIVE: 0, BRIDGE_ROTATION_POSE: 0}
+	var catalog_ok := true
+	# `_generate_constrained_floor()` 是绕过外层 `generate_from_level_plan()` 的直接入口，
+	# 因而必须显式配对测 0°/180°；不依赖 24 个随机种子碰巧抽到 90°。
+	for index in range(RUNTIME_SEEDS):
+		var run_seed := 700000 + index * 7919
+		var zero_policy := policy.duplicate(true)
+		zero_policy["expedition_global_rotation_deg"] = 0
+		var rotated_policy := policy.duplicate(true)
+		rotated_policy["expedition_global_rotation_deg"] = 180
+		var generated_zero := GENERATOR._generate_constrained_floor(
+			LEVEL, 0, run_seed, normalized, zero_policy, templates
+		)
+		var generated_rotated := GENERATOR._generate_constrained_floor(
+			LEVEL, 0, run_seed, normalized, rotated_policy, templates
+		)
+		if generated_zero.is_empty() or generated_rotated.is_empty():
+			_check(false, "㉑ seed %d 的 0°/180° 配对生成为空" % run_seed)
+			continue
+		var zero_errors := VALIDATOR.validate_normalized(
+			LEVEL, 0, generated_zero, zero_policy, templates
+		)
+		if not zero_errors.is_empty():
+			_check(false, "㉒ seed %d 0°校验失败 %s" % [run_seed, str(zero_errors)])
+		var rotated_errors := VALIDATOR.validate_normalized(
+			LEVEL, 0, generated_rotated, rotated_policy, templates
+		)
+		if not rotated_errors.is_empty():
+			_check(false, "㉓ seed %d 180°校验失败 %s" % [run_seed, str(rotated_errors)])
+		var zero_rooms := _bridge_rooms_by_key(generated_zero)
+		var rotated_rooms := _bridge_rooms_by_key(generated_rotated)
+		var room_keys_match := zero_rooms.keys().size() == rotated_rooms.keys().size()
+		for room_key in zero_rooms:
+			if not rotated_rooms.has(room_key):
+				room_keys_match = false
+		_check(room_keys_match, "㉔ seed %d：0°/180°桥房 key 集合必须一致" % run_seed)
+		for room_key in zero_rooms:
+			if not rotated_rooms.has(room_key):
+				continue
+			var zero_room := zero_rooms[room_key] as Dictionary
+			var rotated_room := rotated_rooms[room_key] as Dictionary
+			catalog_ok = _check_formal_bridge_layout(run_seed, room_key, zero_room) and catalog_ok
+			_check_rotated_bridge_instances(run_seed, room_key, zero_room, rotated_room)
+			var pose := int(round(float(zero_room.get("rotation_deg", 0.0))))
+			rooms_by_pose[pose] = int(rooms_by_pose.get(pose, 0)) + 1
+	_check(catalog_ok, "㉕ 正式 v010 每个 component_id 都必须能在运行时注册表解析成 prefab")
+	_check(
+		int(rooms_by_pose[BRIDGE_ROTATION_NATIVE]) + int(rooms_by_pose[BRIDGE_ROTATION_POSE]) > 0,
+		"㉖ %d 个种子里应至少出现一个正式桥房" % RUNTIME_SEEDS
+	)
+
+
+func _bridge_rooms_by_key(generated: Dictionary) -> Dictionary:
+	var result: Dictionary = {}
+	for value in generated.get("rooms", []) as Array:
+		var room := value as Dictionary
+		if str(room.get("template_id", "")) == BRIDGE_TEMPLATE:
+			result[str(room.get("key", ""))] = room
+	return result
+
+
+func _check_formal_bridge_layout(
+	run_seed: int, room_key: String, room: Dictionary
+) -> bool:
+	var instances := room.get("authored_layout_instances", []) as Array
+	var floor_tiles := 0
+	var lower_tiles := 0
+	var formal_components := 0
+	var solid_walls := 0
+	var pit_ends := 0
+	var pit_sides := 0
+	var guardrails := 0
+	var legacy_multi_level := 0
+	var catalog_failures := 0
+	for value in instances:
+		var instance := value as Dictionary
+		var component_id := str(instance.get("component_id", ""))
+		var role := str(instance.get("slot_role", ""))
+		if ROOM._authored_component_prefab(component_id) == null:
+			catalog_failures += 1
+		if role == "floor_tile":
+			floor_tiles += 1
+		elif role == "room_type_component":
+			formal_components += 1
+			if component_id == "ENV-EXPEDITION-L01-BRIDGE-TILE_LOWER":
+				lower_tiles += 1
+		elif role == "solid_wall":
+			solid_walls += 1
+		elif role == LEGACY_MULTI_LEVEL_ROLE:
+			legacy_multi_level += 1
+		if component_id == "ENV-EXPEDITION-L01-BRIDGE-PIT_END":
+			pit_ends += 1
+		elif component_id == "ENV-EXPEDITION-L01-BRIDGE-PIT_SIDE":
+			pit_sides += 1
+		elif component_id == "ENV-EXPEDITION-L01-BRIDGE-BRIDGE_GUARDRAIL":
+			guardrails += 1
+	_check(
+		instances.size() == EXPECTED_FORMAL_INSTANCES,
+		"㉗ seed %d %s：正式 v010 应有 %d 个计划实例，实得 %d"
+		% [run_seed, room_key, EXPECTED_FORMAL_INSTANCES, instances.size()]
+	)
+	_check(
+		floor_tiles == EXPECTED_FORMAL_FLOOR_TILES,
+		"㉘ seed %d %s：floor_tile 应为 %d，实得 %d"
+		% [run_seed, room_key, EXPECTED_FORMAL_FLOOR_TILES, floor_tiles]
+	)
+	_check(
+		formal_components == EXPECTED_FORMAL_ROOM_TYPE_COMPONENTS,
+		"㉙ seed %d %s：room_type_component（含正式坑底砖）应为 %d，实得 %d"
+		% [run_seed, room_key, EXPECTED_FORMAL_ROOM_TYPE_COMPONENTS, formal_components]
+	)
+	_check(lower_tiles == EXPECTED_PIT_TILES, "㉚ seed %d %s：正式坑底砖应为 %d，实得 %d" % [run_seed, room_key, EXPECTED_PIT_TILES, lower_tiles])
+	_check(solid_walls == EXPECTED_FORMAL_SOLID_WALLS, "㉛ seed %d %s：正式墙段应为 %d，实得 %d" % [run_seed, room_key, EXPECTED_FORMAL_SOLID_WALLS, solid_walls])
+	_check(pit_ends == 8, "㉜ seed %d %s：正式坑端壁应为 8，实得 %d" % [run_seed, room_key, pit_ends])
+	_check(pit_sides == 12, "㉝ seed %d %s：正式坑侧壁应为 12，实得 %d" % [run_seed, room_key, pit_sides])
+	_check(guardrails == 2, "㉞ seed %d %s：正式桥侧护栏应为 2，实得 %d" % [run_seed, room_key, guardrails])
+	_check(legacy_multi_level == 0, "㉟ seed %d %s：旧 multi_level_component 必须为 0" % [run_seed, room_key])
+	_check(
+		bool(room.get("authored_layout_shell", false))
+			and bool(room.get("authored_layout_multi_level_room", false)),
+		"㊱ seed %d %s：正式桥房必须走 authored layout 标记" % [run_seed, room_key]
+	)
+	_check(catalog_failures == 0, "㊲ seed %d %s：正式组件 prefab 解析失败 %d 件" % [run_seed, room_key, catalog_failures])
+	return catalog_failures == 0
+
+
+func _check_rotated_bridge_instances(
+	run_seed: int, room_key: String, zero_room: Dictionary, rotated_room: Dictionary
+) -> void:
+	var zero_instances := _instances_by_name(zero_room.get("authored_layout_instances", []) as Array)
+	var rotated_instances := _instances_by_name(rotated_room.get("authored_layout_instances", []) as Array)
+	_check(
+		zero_instances.keys().size() == rotated_instances.keys().size(),
+		"㊱ seed %d %s：0°/180°逐件名称集合必须一致" % [run_seed, room_key]
+	)
+	for instance_name in zero_instances:
+		if not rotated_instances.has(instance_name):
+			_check(false, "㊲ seed %d %s：180°缺少实例 %s" % [run_seed, room_key, instance_name])
+			continue
+		var zero_instance := zero_instances[instance_name] as Dictionary
+		var rotated_instance := rotated_instances[instance_name] as Dictionary
+		var zero_position := zero_instance.get("position", Vector3.ZERO) as Vector3
+		var rotated_position := rotated_instance.get("position", Vector3.ZERO) as Vector3
+		var zero_yaw := float(zero_instance.get("rotation_y_deg", 0.0))
+		var rotated_yaw := float(rotated_instance.get("rotation_y_deg", 0.0))
+		_check(
+			str(zero_instance.get("component_id", "")) == str(rotated_instance.get("component_id", ""))
+				and str(zero_instance.get("slot_role", "")) == str(rotated_instance.get("slot_role", "")),
+			"㊳ seed %d %s/%s：180°名称对应的 ID/role 必须不变" % [run_seed, room_key, instance_name]
+		)
+		_check(
+			_approx(rotated_position.x, -zero_position.x)
+				and _approx(rotated_position.y, zero_position.y)
+				and _approx(rotated_position.z, -zero_position.z),
+			"㊴ seed %d %s/%s：180°位置必须 xz 取反、y 不变" % [run_seed, room_key, instance_name]
+		)
+		_check(
+			_approx(fposmod(rotated_yaw - zero_yaw, 360.0), 180.0),
+			"㊵ seed %d %s/%s：180°偏航必须比 0°增加 180°" % [run_seed, room_key, instance_name]
+		)
+
+
+func _instances_by_name(instances: Array) -> Dictionary:
+	var result: Dictionary = {}
+	for value in instances:
+		var instance := value as Dictionary
+		result[str(instance.get("name", ""))] = instance
+	return result

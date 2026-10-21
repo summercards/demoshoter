@@ -1,0 +1,92 @@
+{
+  "asset_id": "WPN-BUL-MOD-BULLET-BLACKHOLE",
+  "logical_id": "mod_bullet_blackhole",
+  "name": "黑洞弹模块",
+  "slug": "bullet_module_blackhole",
+  "domain": "weapons",
+  "kind": "blackhole",
+  "content_ids": [
+    "mod_bullet_blackhole"
+  ],
+  "godot_dimensions_m": [
+    0.7773077487945557,
+    0.9399999976158142,
+    0.5242307782173157
+  ],
+  "measurement": {
+    "xyz_min_m": [
+      -0.157569229602814,
+      -0.269999980926514,
+      -0.159999996423721
+    ],
+    "xyz_size_m": [
+      0.315138459205627,
+      0.939999997615814,
+      0.319999992847443
+    ]
+  },
+  "principal_length_m": 0.939999997615814,
+  "origin": "bottom_center",
+  "animation_tier": "tier_0_static",
+  "materials": [
+    "01_精工金属_道具骨架",
+    "02_细腻哑光_道具大面",
+    "03_清漆反光_道具点缀",
+    "04_柔和自发光_道具UI"
+  ],
+  "budget_triangles": [
+    100,
+    200
+  ],
+  "status": "已优化并正式接入",
+  "geometry_design": "饱满可辨轮廓；源组件采样减面；无碰撞；公共色盘",
+  "model_variants": {
+    "preview": {
+      "source_blend": "art_source/items_weapons/weapons/bullet_module_blackhole/source/wpn_bullet_module_blackhole_source_v001.blend",
+      "sha256": "5db8de975e2929b9a7a1939a85ebdfe0418738a23e0988f3c2726f63a96916b7",
+      "triangles": 1424,
+      "glb": "assets/art/items_weapons/weapons/bullet_module_blackhole/components/wpn_bullet_module_blackhole_preview_visual_top3d.glb",
+      "prefab": "assets/art/items_weapons/weapons/bullet_module_blackhole/runtime/wpn_bullet_module_blackhole_preview_root_top3d.tscn",
+      "glb_sha256": "a7572d6fd15dfccd5e2c7d48b4f151a5c87362793f191fbeffb61e82cc7c76c5",
+      "prefab_sha256": "9e4de7b479dc94affd74de59cef1dc252341e8b7175005a2c26e327d592fafd4"
+    },
+    "ground": {
+      "source_blend": "art_source/items_weapons/weapons/bullet_module_blackhole/source/wpn_bullet_module_blackhole_ground_source_v001.blend",
+      "sha256": "d4deff8ba431e8374661a8af359904336f73d0e6c7ffe82cdef98bf01f135150",
+      "triangles": 194,
+      "glb": "assets/art/items_weapons/weapons/bullet_module_blackhole/components/wpn_bullet_module_blackhole_ground_visual_top3d.glb",
+      "prefab": "assets/art/items_weapons/weapons/bullet_module_blackhole/runtime/wpn_bullet_module_blackhole_ground_root_top3d.tscn",
+      "glb_sha256": "0982fca3765e55cc979a854f61e2579bef8ba7063e658181be9ce483c85b62b2",
+      "prefab_sha256": "142fa92b45d252d6738fda877f724672eebc6d9053281b75bea15aebcd1c2b07"
+    }
+  },
+  "validation": {
+    "runtime_gallery": true,
+    "content_mapping": true,
+    "ground_budget": true,
+    "notes": "see development/2026-10-14_remaining_item_models.md"
+  },
+  "palette_contract": {
+    "path": "assets/art/shared/palette/item_high_visibility_palette_10x10_512.png",
+    "sha256": "8da13f6d4da6701b983aa88cfd0e839a8178ab5c51a8f169fc8a4638308cb1c7",
+    "recipe": "art_source/shared/palette/item_palette_recipe_v001.json",
+    "import_script": "tools/asset_pipeline/item_shared_palette_post_import.gd",
+    "saturation_multiplier": 1.6099999999999999,
+    "value_multiplier": 1.6099999999999999,
+    "material_roles": [
+      "01_精工金属_道具骨架",
+      "02_细腻哑光_道具大面",
+      "03_清漆反光_道具点缀",
+      "04_柔和自发光_道具UI"
+    ],
+    "material_paths": [
+      "assets/art/items_weapons/shared/materials/itm_metal.tres",
+      "assets/art/items_weapons/shared/materials/itm_matte.tres",
+      "assets/art/items_weapons/shared/materials/itm_clearcoat.tres",
+      "assets/art/items_weapons/shared/materials/itm_emissive.tres"
+    ],
+    "icon_shadow_fill_energy": 0.45,
+    "geometry_uv_unchanged": true,
+    "validated_on": "2026-10-15"
+  }
+}

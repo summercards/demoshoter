@@ -1,0 +1,97 @@
+class_name DungeonEntrance3D
+extends Area3D
+
+signal activated(entrance: DungeonEntrance3D)
+
+@export var entrance_id := "dungeon_01"
+@export var display_name := "副本入口"
+@export_multiline var description := ""
+@export_file("*.tscn") var target_scene_path := ""
+@export_range(1, 99, 1) var target_floor := 1
+@export var entrance_color := Color(0.72, 0.34, 0.20)
+
+@onready var frame_mesh: MeshInstance3D = $Visual/Frame
+@onready var door_mesh: MeshInstance3D = $Visual/Door
+@onready var beacon_mesh: MeshInstance3D = $Visual/Beacon
+@onready var beacon_light: OmniLight3D = $Visual/BeaconLight
+@onready var name_label: Label3D = $NameLabel
+@onready var prompt_label: Label3D = $PromptLabel
+
+var _player_in_range := false
+
+
+func _ready() -> void:
+	add_to_group("dungeon_entrance")
+	add_to_group(PlayerInteractionController3D.PROVIDER_GROUP)
+	body_entered.connect(_on_body_entered)
+	body_exited.connect(_on_body_exited)
+	name_label.text = display_name
+	prompt_label.text = "[E] 进入 %s" % display_name
+	prompt_label.visible = false
+	_apply_material(frame_mesh, entrance_color.darkened(0.38), 0.64, 0.52)
+	_apply_material(door_mesh, entrance_color.darkened(0.70), 0.42, 0.62)
+	_apply_material(beacon_mesh, entrance_color, 0.18, 0.34, true)
+	beacon_light.light_color = entrance_color
+	beacon_light.add_to_group(EnemyIllumination3D.LOCAL_LIGHT_GROUP)
+	beacon_light.set_meta("gameplay_light_kind", "omni")
+
+
+func _process(delta: float) -> void:
+	$Visual/Beacon.rotation.y -= delta * (1.9 if _player_in_range else 0.45)
+	beacon_light.light_energy = 3.0 if _player_in_range else 1.8 + sin(Time.get_ticks_msec() * 0.0023) * 0.14
+
+
+func get_interaction_candidate(_player: Player3D) -> Dictionary:
+	if not _player_in_range:
+		return {}
+	return {
+		"available": true,
+		"interaction_id": "dungeon_entrance:%s" % entrance_id,
+		"position": global_position,
+		"priority": 90,
+		"prompt": prompt_label.text,
+	}
+
+
+## 文字提示牌退役为纯文案载体（text 仍被候选协议读取）；可见反馈由常驻圆点承担。
+func set_interaction_focus(_candidate: Dictionary, _focused: bool) -> void:
+	pass
+
+
+func get_interaction_dot_anchor() -> Vector3:
+	if prompt_label != null and is_instance_valid(prompt_label):
+		return prompt_label.global_position
+	return global_position + Vector3.UP * 2.0
+
+
+
+func perform_interaction(_player: Player3D, _candidate: Dictionary) -> bool:
+	if not _player_in_range:
+		return false
+	activated.emit(self)
+	return true
+
+
+func _on_body_entered(body: Node3D) -> void:
+	if not body.is_in_group("player_3d"):
+		return
+	_player_in_range = true
+
+
+func _on_body_exited(body: Node3D) -> void:
+	if not body.is_in_group("player_3d"):
+		return
+	_player_in_range = false
+	prompt_label.visible = false
+
+
+func _apply_material(mesh_instance: MeshInstance3D, color: Color, metallic: float, roughness: float, emission := false) -> void:
+	var material := StandardMaterial3D.new()
+	material.albedo_color = color
+	material.metallic = metallic
+	material.roughness = roughness
+	if emission:
+		material.emission_enabled = true
+		material.emission = color
+		material.emission_energy_multiplier = 2.0
+	mesh_instance.material_override = material

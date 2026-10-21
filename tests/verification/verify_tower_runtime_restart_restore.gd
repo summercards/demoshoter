@@ -1,0 +1,214 @@
+extends Node
+
+const TEST_PATH := "user://tower_runtime_restart_probe.json"
+
+
+func _ready() -> void:
+	var failures: Array[String] = []
+	var original_path: String = BaseManager.save_path
+	var original_data: BaseData = BaseManager.data
+	_cleanup()
+	BaseManager.save_path = TEST_PATH
+	BaseManager.data = BaseData.new()
+	BaseManager.data.tutorial_completed = true
+
+	var scene := load("res://scenes/TowerDescent3D.tscn") as PackedScene
+	var first := scene.instantiate() as TowerDescent3D
+	first.test_mode = false
+	add_child(first)
+	await get_tree().process_frame
+	await get_tree().process_frame
+	if not first.generate_through_floor_for_test(98):
+		failures.append("98F FloorBundle 初次提交失败")
+	# 普通交通门的物理开闭不属于行动进度。即使两条楼梯路线已经授权，
+	# 保存/恢复也不能把100/99F四扇自动门重新打开。
+	for pair in [["start", "facility"], ["facility", "floor_01_entry"]]:
+		var transit_edge := first.call("_edge_key", pair[0], pair[1]) as String
+		(first.get("_open_edges") as Dictionary)[transit_edge] = true
+		(first.get("_vertical_arrival_open") as Dictionary)[transit_edge] = true
+	var first_rooftop := (first.get("_room_by_id") as Dictionary).get("start") as DungeonRoom3D
+	var first_facility := (first.get("_room_by_id") as Dictionary).get("facility") as DungeonRoom3D
+	if first_rooftop != null:
+		first_rooftop.set_door_open("west", false, true)
+	if first_facility != null:
+		first_facility.set_door_open("west", false, true)
+		first_facility.set_door_open("east", false, true)
+	var first_rooftop_extra := first.find_child("BaseRooftopTransitDoor", true, false) as RoomDoor3D
+	if first_rooftop_extra != null:
+		first_rooftop_extra.set_open(false, true)
+	var combat_room := (first.get("_room_by_id") as Dictionary).get("floor_01_main_02") as DungeonRoom3D
+	if combat_room == null:
+		failures.append("98F 战斗房没有生成")
+		await _finish(first, original_path, original_data, failures)
+		return
+	var combat_room_id := combat_room.room_id
+	first.player.global_position = combat_room.global_position + Vector3(1.25, 0.05, -1.1)
+	first.call("_on_room_entered", combat_room)
+	combat_room.cleared = true
+	(first.get("_spawned_rooms") as Dictionary)[combat_room.room_id] = true
+	var expected_layout_id := str(((first.get("_floor_plan_snapshots") as Dictionary).get(2, {}) as Dictionary).get("layout_id", ""))
+	var expected_entry_room := (first.get("_room_by_id") as Dictionary).get("floor_01_entry") as DungeonRoom3D
+	var expected_restore_position := (
+		expected_entry_room.global_position + Vector3.UP * 0.05
+		if expected_entry_room != null else combat_room.global_position + Vector3.UP * 0.05
+	)
+	await get_tree().physics_frame
+	# 保留一个物理帧，使保存前的角色稳定落地；恢复目标由入口安全房间决定。
+	var inventory := first.get_inventory_module()
+	inventory.clear_all()
+	var backpack := ItemRegistry.get_instance().get_item("equipment_backpack_2")
+	first.player.equip_backpack_item(backpack)
+	inventory.set_capacity(14)
+	inventory.add_item(ItemRegistry.get_instance().get_item("item_health_potion"), 2)
+	first.call("_on_quick_item_assignment_requested", 0, "item_health_potion")
+	inventory.add_item(ItemRegistry.get_instance().get_item("item_battery_l"), 2)
+	first.player.clear_all_equipped_weapons()
+	var pistol := ItemRegistry.get_instance().get_item("weapon_pistol")
+	var shotgun := ItemRegistry.get_instance().get_item("weapon_shotgun")
+	first.player.equip_weapon_item_to_slot(pistol, 0)
+	first.player.equip_weapon_item_to_slot(shotgun, 1)
+	first.player.switch_weapon_slot(1)
+	var expected_main_id := first.player.get_equipped_weapon_instance_id_for_slot(0)
+	var expected_side_id := first.player.get_equipped_weapon_instance_id_for_slot(1)
+	first.get("_insurance").insure_item_direct(ItemRegistry.get_instance().get_item("item_battery_s"))
+	var flashlight := first.player.get_node_or_null("PlayerFlashlight3D")
+	flashlight.set_charge_ratio(0.37)
+	if not BaseManager.flush_runtime_checkpoint("test_restart_boundary"):
+		failures.append("场景级运行态快照写入失败")
+	first.queue_free()
+	await get_tree().process_frame
+	await get_tree().process_frame
+
+	# 丢弃内存中的 BaseData，再从磁盘读取，模拟完整进程重启。
+	BaseManager.data = BaseData.new()
+	BaseManager.load_base()
+	var second := scene.instantiate() as TowerDescent3D
+	second.test_mode = false
+	add_child(second)
+	# FloorBundle重建和玩家快照恢复均为deferred链，固定等待3帧在连续
+	# 专项运行时会偶发早一帧取样。最多等待20帧，只等明确恢复条件。
+	for _frame in 20:
+		await get_tree().process_frame
+		if (
+			str(second.get("_current_room_id")) == "floor_01_entry"
+			and _positions_restore_equivalent(second.player.global_position, expected_restore_position)
+		):
+			break
+	var restored_inventory := second.get_inventory_module()
+	if restored_inventory.get_capacity() != 14 or restored_inventory.get_item_count("item_battery_l") != 2:
+		failures.append("重建塔楼后背包容量、格位或堆叠没有恢复")
+	var restored_quick := second.get("_quick_inventory") as InventoryModule
+	if (
+		restored_quick == null
+		or restored_quick.get_item_count("item_health_potion") != 2
+		or restored_inventory.has_item("item_health_potion")
+	):
+		failures.append("快捷栏真实物品、数量或与背包互斥所有权没有跨重启恢复")
+	if second.player.get_equipped_weapon_instance_id_for_slot(0) != expected_main_id:
+		failures.append("主武器稳定实例 ID 没有跨重启恢复")
+	if second.player.get_equipped_weapon_instance_id_for_slot(1) != expected_side_id:
+		failures.append("副武器稳定实例 ID 没有跨重启恢复")
+	if second.player.get_active_weapon_slot() != 1:
+		failures.append("当前激活武器槽没有恢复")
+	if str(second.player.get_equipped_backpack_item().get("id", "")) != "equipment_backpack_2":
+		failures.append("已装备背包没有恢复")
+	if second.get("_insurance").get_used_slots() != 1:
+		failures.append("保险格没有随塔楼场景重建恢复")
+	var restored_flashlight := second.player.get_node_or_null("PlayerFlashlight3D")
+	if not is_equal_approx(restored_flashlight.get_charge_ratio(), 0.37):
+		failures.append("手电电量没有恢复")
+	var restored_room := (second.get("_room_by_id") as Dictionary).get(combat_room_id) as DungeonRoom3D
+	if restored_room == null:
+		failures.append("重启后没有按行动种子重新提交98F FloorBundle")
+	elif str(second.get("_current_room_id")) != "floor_01_entry":
+		failures.append("重启后没有回到保存楼层的入口安全房间")
+	elif not _positions_restore_equivalent(second.player.global_position, expected_restore_position):
+		failures.append("重启后玩家没有出生在保存楼层入口安全房间中心 expected=%s actual=%s distance=%.3f" % [
+			str(expected_restore_position), str(second.player.global_position),
+			second.player.global_position.distance_to(expected_restore_position),
+		])
+	if restored_room != null and not restored_room.cleared:
+		failures.append("已清理房间进度没有跨重启恢复")
+	var restored_layout_id := str(((second.get("_floor_plan_snapshots") as Dictionary).get(2, {}) as Dictionary).get("layout_id", ""))
+	if restored_layout_id != expected_layout_id:
+		failures.append("相同行动种子在重启后生成了不同的98F布局")
+	if 2 not in (second.get("_generated_floor_indices") as Array):
+		failures.append("恢复后的98F没有登记为已提交楼层")
+	var restored_simple_doors: Array[RoomDoor3D] = []
+	var second_rooftop := (second.get("_room_by_id") as Dictionary).get("start") as DungeonRoom3D
+	var second_facility := (second.get("_room_by_id") as Dictionary).get("facility") as DungeonRoom3D
+	if second_rooftop != null and second_rooftop.get_door_node("west") != null:
+		restored_simple_doors.append(second_rooftop.get_door_node("west"))
+	if second_facility != null:
+		for side in ["west", "east"]:
+			if second_facility.get_door_node(side) != null:
+				restored_simple_doors.append(second_facility.get_door_node(side))
+	var second_rooftop_extra := second.find_child("BaseRooftopTransitDoor", true, false) as RoomDoor3D
+	if second_rooftop_extra != null:
+		restored_simple_doors.append(second_rooftop_extra)
+	if restored_simple_doors.size() != 4:
+		failures.append("重启后100/99F四扇普通交通门不完整")
+	for restored_door in restored_simple_doors:
+		if restored_door.is_open or not bool(restored_door.get_snapshot().get("blocks_passage", false)):
+			failures.append("已授权路线读档后错误重开普通交通门：%s" % restored_door.name)
+	# 旧档可能把西侧楼梯edge保存为false；迁移后必须强制恢复永久结构，且
+	# 不能借此开启任何普通门实体。
+	var legacy_route_snapshot := second.build_runtime_save_snapshot()
+	var permanent_west_edge := second.call("_edge_key", "start", "facility") as String
+	(legacy_route_snapshot.get("edge_states", {}) as Dictionary)[permanent_west_edge] = false
+	second.call("_restore_runtime_save_snapshot", legacy_route_snapshot)
+	if not bool((second.get("_open_edges") as Dictionary).get(permanent_west_edge, false)):
+		failures.append("旧档中的西侧楼梯关闭标志没有迁移为永久结构")
+	for restored_door in restored_simple_doors:
+		if restored_door.is_open:
+			failures.append("旧西侧路线迁移错误打开普通交通门：%s" % restored_door.name)
+	# 模拟历史错误档：房间标签仍是99F，但坐标已落在98F/楼梯高度。
+	# 恢复必须拒绝把关卡坐标放进facility，并回退到99F合法中心。
+	var invalid_snapshot := second.build_runtime_save_snapshot()
+	invalid_snapshot["current_room_id"] = "facility"
+	invalid_snapshot["current_floor_index"] = 1
+	invalid_snapshot["player_position"] = [-47.14, -17.97, -67.11]
+	second.call("_restore_runtime_save_snapshot", invalid_snapshot)
+	var facility := (second.get("_room_by_id") as Dictionary).get("facility") as DungeonRoom3D
+	if facility == null or not second.call("_is_runtime_restore_position_valid", facility, second.player.global_position):
+		failures.append("矛盾的99F房间/关卡坐标没有安全回退到基地合法位置")
+
+	await _finish(second, original_path, original_data, failures)
+
+
+func _positions_restore_equivalent(actual: Vector3, expected: Vector3) -> bool:
+	# CharacterBody在恢复后的首个物理帧会再贴地约5cm；玩法要求锁定
+	# 水平房间坐标，并允许一个安全的贴地步长。
+	return (
+		Vector2(actual.x, actual.z).distance_to(Vector2(expected.x, expected.z)) <= 0.05
+		and absf(actual.y - expected.y) <= 0.10
+	)
+
+
+func _finish(scene: Node, original_path: String, original_data: BaseData, failures: Array[String]) -> void:
+	if scene != null and is_instance_valid(scene):
+		scene.queue_free()
+	await get_tree().process_frame
+	await get_tree().process_frame
+	BaseManager.save_path = original_path
+	BaseManager.data = original_data
+	_cleanup()
+	# 让_ready调用栈中的PackedScene、房间及物品局部引用先释放，再退出引擎；
+	# 否则主体断言通过时仍可能留下只存在于测试栈上的资源引用。
+	call_deferred("_report_and_quit", failures.duplicate())
+
+
+func _report_and_quit(failures: Array[String]) -> void:
+	if failures.is_empty():
+		print("TOWER_RUNTIME_RESTART_OK: seeded 98F world, room progress, position, inventory, real quick slots, equipment, insurance and flashlight survive restart")
+		get_tree().quit(0)
+		return
+	for failure in failures:
+		push_error(failure)
+	get_tree().quit(1)
+
+
+func _cleanup() -> void:
+	for path in [TEST_PATH, TEST_PATH + ".tmp", TEST_PATH + ".bak"]:
+		if FileAccess.file_exists(path):
+			DirAccess.remove_absolute(ProjectSettings.globalize_path(path))

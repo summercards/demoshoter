@@ -1,0 +1,9 @@
+[gd_scene format=3 uid="uid://o8qfym0dixh"]
+
+[ext_resource type="Script" path="res://src/game/DemoRoomGameMode.gd" id="1_demo_gamemode"]
+[ext_resource type="PackedScene" path="res://scenes/GameUIManager.tscn" id="2_gameui"]
+
+[node name="DemoRoomChain" type="Node2D" unique_id=1355952425]
+script = ExtResource("1_demo_gamemode")
+
+[node name="GameUIManager" parent="." unique_id=1674208311 instance=ExtResource("2_gameui")]
