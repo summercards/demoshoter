@@ -87,7 +87,7 @@ theme_override_font_sizes/font_size = 15
 [node name="Title" type="Label" parent="Screen/MenuPanel/Margin/Content"]
 visible = false
 layout_mode = 2
-text = "弹壳风暴 2"
+text = "弹壳风暴-青春版"
 
 [node name="Subtitle" type="Label" parent="Screen/MenuPanel/Margin/Content"]
 visible = false

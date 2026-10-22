@@ -1,0 +1,20 @@
+Noto Sans SC
+============
+
+本目录下的 NotoSansSC-Regular.otf 来自 Google Noto 字体项目（notofonts/noto-cjk）。
+
+授权：SIL Open Font License, Version 1.1
+原文：https://github.com/notofonts/noto-cjk/blob/main/Sans/LICENSE
+
+该许可允许自由使用、嵌入、修改与再分发（含商业用途），要求：
+  1) 字体软件本身不得单独售卖；
+  2) 修改后的版本不得使用保留字体名称（Reserved Font Name）；
+  3) 再分发时须附带本许可声明。
+
+用途（2026-10-22）：仅作为 **Web 导出的默认字体**（project.godot 的
+`gui/theme/custom_font.web`）。原因：全工程字体走 SystemFont，而浏览器沙箱内
+没有可访问的系统字体，Web 版中文会全部渲染成方框。桌面端与安卓端不引用本字体，
+字形保持原样。
+
+替换/移除方式：删除本目录并在 project.godot 去掉那一行 web 覆盖即可；
+Web 版将退回"中文显示为方框"的原始状态。

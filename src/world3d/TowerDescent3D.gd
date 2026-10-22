@@ -637,11 +637,11 @@ func _ready() -> void:
 				_current_room_id = ""
 				_on_room_entered(facility_room)
 	if is_expedition():
-		title_label.text = "弹壳风暴2 · %s" % get_expedition_display_name()
+		title_label.text = "弹壳风暴-青春版 · %s" % get_expedition_display_name()
 		seed_label.text = "关卡种子 %d" % run_seed
 		status_label.text = "远征情报已同步。" + _expedition_entry_objective()
 	else:
-		title_label.text = "弹壳风暴2 · 向下爬楼行动"
+		title_label.text = "弹壳风暴-青春版 · 向下爬楼行动"
 		seed_label.text = "塔楼种子 %d" % run_seed
 		if opening_ready and not starts_on_rooftop:
 			status_label.text = "你在主人的办公室里醒来。这里没有活物 —— 东门通往来路，西侧楼梯继续向下。"
@@ -827,7 +827,7 @@ func _fail_expedition_bootstrap(reason: String) -> void:
 		player.process_mode = Node.PROCESS_MODE_DISABLED
 	process_mode = Node.PROCESS_MODE_DISABLED
 	if title_label != null:
-		title_label.text = "弹壳风暴2 · 远征启动失败"
+		title_label.text = "弹壳风暴-青春版 · 远征启动失败"
 		_show_expedition_failure_label(title_label)
 	if status_label != null:
 		status_label.text = "远征启动失败：%s。请通过暂停界面退出当前场景。" % reason

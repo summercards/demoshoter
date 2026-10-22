@@ -180,7 +180,7 @@ def pkg_info(exe: Path) -> dict:
 
 def render_md(data: dict, pkg: dict, site_id: str, base_url: str) -> str:
     L: list[str] = []
-    L.append("# 弹壳风暴2 · 每日更新")
+    L.append("# 弹壳风暴-青春版 · 每日更新")
     L.append("")
     L.append(f"> 生成时间：{data['generated_at']}　|　统计窗口：过去 {data['window_hours']} 小时"
              f"（自 {data['window_since']}）")
@@ -249,7 +249,7 @@ def render_html(data: dict, pkg: dict, site_id: str, base_url: str) -> str:
     parts.append(f"""<!doctype html>
 <html lang="zh-CN"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>弹壳风暴2 · 下载与更新日志</title>
+<title>弹壳风暴-青春版 · 下载与更新日志</title>
 <style>
 :root {{ color-scheme: light dark; }}
 * {{ box-sizing: border-box; }}
@@ -276,7 +276,7 @@ code {{ font-family:ui-monospace,Menlo,Consolas,monospace; font-size:.86em;
          background:rgba(200,140,40,.08); font-size:.86rem; }}
 .ref {{ opacity:.75; }}
 </style></head><body><main>
-<h1>弹壳风暴2</h1>
+<h1>弹壳风暴-青春版</h1>
 <p class="sub">每日自动打包发布　·　{html.escape(data['generated_at'])}</p>
 
 <a class="dl" href="{html.escape(EXE_NAME)}">

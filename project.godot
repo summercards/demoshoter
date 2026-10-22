@@ -53,7 +53,7 @@ permissions/post_notifications=false
 
 [application]
 
-config/name="弹壳风暴2"
+config/name="弹壳风暴-青春版"
 config/description="顶视角射击搜打撤肉鸽游戏"
 config/version="0.1.0"
 run/main_scene="res://scenes/StartupLoadingScreen.tscn"
@@ -220,6 +220,18 @@ toggle_floor_map={
 ]
 }
 
+[gui]
+
+; Web 平台专用默认字体（2026-10-22）。
+; 背景：全工程字体都走 `SystemFont`（见 StartupLoadingScreen.gd / DamageNumberStyle.gd），
+; 而浏览器沙箱里没有"系统字体"这个概念 —— Web 导出后中文全部渲染成方框，
+; 开场菜单的按钮文字、HUD 全部看不见，等于不能玩。
+; 这里用 ProjectSettings 的 **feature tag 覆盖**（后缀 `.web`）：只在 Web 构建生效，
+; 桌面端/安卓端字形一字不变，符合"其它什么都别变"。
+; 字体为 Noto Sans SC（SIL Open Font License 1.1，允许嵌入与分发），
+; 许可原文见 assets/fonts/LICENSE_OFL.txt。
+theme/custom_font.web="res://assets/fonts/NotoSansSC-Regular.otf"
+
 [performance]
 
 quality_profile="high"
@@ -227,5 +239,6 @@ quality_profile="high"
 [rendering]
 
 renderer/rendering_method.mobile="gl_compatibility"
+renderer/rendering_method.web="gl_compatibility"
 textures/vram_compression/import_etc2_astc=true
 environment/defaults/default_clear_color=Color(0, 0, 0, 1)

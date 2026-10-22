@@ -11,6 +11,9 @@ import subprocess
 from urllib.parse import unquote
 
 
+EMPTY_PROJECT_MARKER = "<!-- EMPTY-PROJECT-INDEX -->"
+
+
 def check(root: Path) -> dict:
     issues = []
     required = [
@@ -52,8 +55,13 @@ def check(root: Path) -> dict:
     index = root / "docs/v0.1/MODULE_INDEX.md"
     features = []
     test_references = set()
+    # 空工程是**显式声明**的合法状态，不是缺失：索引里必须有一行标记说明「我确认现在没有功能」。
+    # 有标记又有功能行 = 矛盾，直接报错；没标记又没功能行 = 漏写，仍然报错。
+    empty_project = False
     if index.is_file():
-        for line_number, line in enumerate(index.read_text(encoding="utf-8").splitlines(), 1):
+        index_text = index.read_text(encoding="utf-8")
+        empty_project = EMPTY_PROJECT_MARKER in index_text
+        for line_number, line in enumerate(index_text.splitlines(), 1):
             match = re.match(r'^\| ([A-Z]+-[A-Z]+) \|', line)
             if not match:
                 continue
@@ -72,8 +80,16 @@ def check(root: Path) -> dict:
                     issues.append(f"Missing test script: {name}")
                 elif not scene.is_file() and "仅脚本" not in line:
                     issues.append(f"Test scene absent; explicitly mark 仅脚本 in index: {name}")
-        if not features:
-            issues.append("No feature rows found")
+        if not features and not empty_project:
+            issues.append(
+                "No feature rows found and no EMPTY-PROJECT-INDEX marker: "
+                "登记功能，或在 MODULE_INDEX.md 声明空工程"
+            )
+        if features and empty_project:
+            issues.append(
+                f"EMPTY-PROJECT-INDEX marker present but {len(features)} feature rows exist: "
+                "删除标记或清空功能表"
+            )
     registry_check = subprocess.run(
         ["python3", str(root / "scripts/check_verification_registry.py")],
         cwd=root,
@@ -116,7 +132,8 @@ def check(root: Path) -> dict:
         issues.append(f"Media asset domains invalid: {detail}")
     return {
         "engine_version": version, "documents": len(paths), "local_links": links,
-        "features": len(features), "test_references": len(test_references),
+        "features": len(features), "empty_project": empty_project,
+        "test_references": len(test_references),
         "issues": issues,
         "limits": "Does not validate design semantics, Markdown anchors, runtime behavior, or test results. Not installed as a CI/hook gate.",
     }

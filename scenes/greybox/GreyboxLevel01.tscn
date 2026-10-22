@@ -1,8 +1,21 @@
-[gd_scene load_steps=3 format=3]
+[gd_scene load_steps=4 format=3]
+
+; 开场 UI 挂载（2026-10-22）
+;
+; 把**原版**开始菜单与镜头演出挂进灰盒主场景。本文件没有新增任何自制逻辑：
+;   · MainEntryScreen3D 是原场景实例（res://scenes/ui/MainEntryScreen3D.tscn），
+;     脚本一行未改，近景机位 / FOV 52 / roll -7° / 1.15s 插值全在它自己内部。
+;   · 它能自己找到玩家：@export auto_present_when_player_found 默认 true，
+;     _ready → call_deferred("_auto_present") → get_first_node_in_group("player_3d")。
+;     Dungeon3D.tscn 里 Player3D 是静态子节点，_ready 时已经在组里，时序天然成立。
+;
+; 挂在根下（parent="."），排在最后 —— 覆盖层要盖在 HUD 之上。
 
 [ext_resource type="Script" path="res://scenes/greybox/greybox_builder.gd" id="1_greybox_builder"]
 
 [ext_resource type="PackedScene" path="res://scenes/Dungeon3D.tscn" id="2_base"]
+
+[ext_resource type="PackedScene" path="res://scenes/ui/MainEntryScreen3D.tscn" id="3_entry"]
 
 [node name="GreyboxLevel01" instance=ExtResource("2_base")]
 script = ExtResource("1_greybox_builder")
@@ -17,3 +30,5 @@ layout_variant = 0
 spawn_offset_m = Vector3(0, 1, 20)
 next_level_id = "99"
 spawn_real_player = true
+
+[node name="MainEntryScreen3D" parent="." instance=ExtResource("3_entry")]

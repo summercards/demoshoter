@@ -1,10 +1,17 @@
 # v323run 灰盒工程：启动链回接原版 + 主世界光影基线
 
+> ⚠️ **本轮记录中的「启动链」结论已于同日晚被撤销**
+> （见 `2026-10-21_entry_menu_camera_restore.md`）。
+> 该轮把启动链改走 greybox，是为绕开被移出的 `assets/art/environments/`；
+> 环境资产移回后启动链已恢复为 `StartupLoadingScreen → TowerDescent3D`，
+> 因为**开始菜单 `MainEntryScreen3D` 只由 `TowerDescent3D` 安装**，走 greybox 会整个丢掉它。
+> 下文灰盒场景本身的改动仍然有效，只是它不再位于启动路径上。
+
 工程版本 0.1.0（`project.godot` 未改）。目标工程 `I:\_scaffold_test\v323run\ShellStorm2Port`；源工程 `I:\工作项目\shellstrom2\ShellStorm2` 全程只读。本轮接续 2026-10-21 上一轮被 usage 上限打断的修复，把隔离副本的改动收尾、验收并回写。
 
 ## 问题与改动
 
-### 1. 启动链换成原版 `Dungeon3D` 基座
+### 1. 启动链换成原版 `Dungeon3D` 基座 〔已撤销，见顶部说明〕
 
 `GreyboxLevel01.tscn` / `GreyboxLevel02.tscn` 由 `type="Node3D"` 改为 `instance=ExtResource("2_base")`（`res://scenes/Dungeon3D.tscn`），灰盒脚本只负责空间与表现，战斗、背包、奖励、结算、存档全部回到 `Dungeon3D` 原实现。关卡身份按「初始灰盒 → 回合 99」重定：`greybox_home` / `99`，`next_level_id` 互指，`EXPEDITION_LEVELS` 只留 99，`RogueMapSelectMenu` 的 `LEVEL_IDS` 同口径。
 

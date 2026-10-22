@@ -207,7 +207,7 @@ def build(args) -> dict:
 
 def render_markdown(data: dict, pkg: dict | None = None) -> str:
     lines: list[str] = []
-    lines.append(f"# 弹壳风暴2 · 每日更新")
+    lines.append(f"# 弹壳风暴-青春版 · 每日更新")
     lines.append("")
     lines.append(f"> 生成时间：{data['generated_at']}　|　统计窗口：过去 {data['window_hours']} 小时（自 {data['window_since']}）")
     if pkg:

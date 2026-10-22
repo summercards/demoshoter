@@ -1,7 +1,7 @@
 # ShellStorm2 模块制作链路 · 工具 · 实用逻辑 · 评判维度
 
 > 版本：2026-10-20 整理版
-> 适用：ShellStorm2 v0.1.0（`project.godot` → `config/name="弹壳风暴2"`，`config/features=PackedStringArray("4.6","Forward Plus")`，主场景 `res://scenes/StartupLoadingScreen.tscn`）
+> 适用：ShellStorm2 v0.1.0（`project.godot` → `config/name="弹壳风暴-青春版"`，`config/features=PackedStringArray("4.6","Forward Plus")`，主场景 `res://scenes/StartupLoadingScreen.tscn`）
 > 统计口径：2026-10-20 14:20 在 2 号机（`I:\工作项目\shellstrom2\ShellStorm2`）实测，`src/**/*.gd` 递归统计文件数与行数
 > 与既有文档的关系：`docs/v0.1/MODULE_INDEX.md`（43,146 字符）按 FeatureID 记「交付了什么」；本文补「每个模块怎么造、用什么工具、核心逻辑落在哪几个文件、验收怎么判」。两份不重复，一起看。
 

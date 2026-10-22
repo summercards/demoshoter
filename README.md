@@ -1,40 +1,50 @@
 # 弹壳风暴2
 
-Godot 4.6 顶视角 3D 搜打撤肉鸽。当前项目版本为 `0.1.0`。
+Godot 4.6 顶视角 3D 项目骨架。当前工程版本 `0.1.0`。
 
-关卡入口分两条并存路线，共用同一套房间、门、楼梯、美术与掉落实现：
+**这是初始化骨架工程：有能跑的 3D 底座、完整的工程规范、一批可复用的运行时模块；没有已确定的玩法。**
 
-- **正式主线**：99F 基地中央**远征情报室**选关 → “传送进入副本”＝切换地图 → 独立关卡（目标为单层完整肉鸽关卡 + 撤离房间/撤离信号塔）。
-- **隐藏关卡**：塔楼连续爬楼，入口 `scenes/TowerDescent3D.tscn`（100F 天台 → 99F 基地 → 98F 到达门逐层下潜）。本轮不改动。
+主设计文档现在是空白骨架，不回答「这个游戏是什么」：
 
-契约见[关卡生成与爬楼](docs/v0.1/05_技术施工_关卡生成与爬楼.md) §3.0。单层化与撤离房间目前**尚未施工**。
+- 主设计：[docs/v0.1/README.md](docs/v0.1/README.md)
+- 手上有什么积木：[docs/SKELETON_CAPABILITIES.md](docs/SKELETON_CAPABILITIES.md)
+- 当前功能登记：零个（[MODULE_INDEX.md](docs/v0.1/MODULE_INDEX.md) 的空白表就是答案）
+
+原《弹壳风暴2》的全部玩法设计与施工记录已归档在 `docs/archive/inherited_shellstorm2_2026-10-21/`，**只能参考，不能当本工程的设计依据**。
+
+## 现在能跑什么
+
+启动 → 加载页（标题「弹壳风暴-青春版」）→ 灰盒战斗场景 `scenes/greybox/GreyboxLevel01.tscn`。
+
+灰盒 `instance` 自 `scenes/Dungeon3D.tscn`，继承战斗、背包、奖励、装备事务与存档；几何是程序化白盒（60×60 m、5 个胶囊敌人、白盒设施占位）。这条链路 2026-10-21 有 22 条断言的实测记录。
+
+注意：基座自带「清房间 / 开箱 / 撤离」不等于这些是本工程的目标玩法。留不留、改不改，都还是设计决定。
 
 ## 开始开发
 
-先阅读 [工程文档入口](docs/README.md)、[文档驱动开发规范](docs/DOCUMENTATION_STANDARD.md)与[功能契约索引](docs/v0.1/MODULE_INDEX.md)。设计规范和开发记录已分离；当前风险与验证基线见[工程健康审计](docs/v0.1/audits/2026-09-12_engineering_audit.md)。
-
-1. 使用 Godot 4.6.x 打开仓库根目录。
-2. 运行项目进入塔楼主循环。
-3. 修改前先阅读 [游戏设计文档 v0.1](docs/v0.1/README.md)；性能施工同时阅读 [性能优化与热管理](docs/v0.1/13_技术施工_性能优化与热管理.md)。
-4. 提交前运行 `./scripts/run_verification_suite.sh smoke`；涉及关卡、角色、战斗或资产时运行对应专项或 `full`。
+1. 用 Godot 4.6.x 打开仓库根目录。
+2. 先读 [工程文档入口](docs/README.md)，再读 [文档驱动开发规范](docs/DOCUMENTATION_STANDARD.md)。
+3. 要动玩法：先按主设计文档 §5 走「提案 → 冻结 → 登记 → 契约 → 施工」，**不能先写代码再倒推设计**。
+4. 要加关卡：读 [关卡接入规范](docs/v0.1/关卡接入规范.md)。
+5. 交付前跑 `python3 scripts/check_documentation_contracts.py` 与相关验证；涉及关卡、角色、战斗或资产时跑对应专项。
 
 ## 目录
 
 | 路径 | 职责 |
 |---|---|
-| `scenes/` | 可运行场景、UI 页面和场景装配入口 |
-| `src/framework/` | 跨系统稳定契约，不保存具体玩法状态 |
-| `src/core/` | 全局基础设施、状态机、存储与音频 |
-| `src/world3d/` | 当前 3D 关卡、房间、门、撤离和塔楼生成 |
-| `src/player3d/` / `src/enemy3d/` | 当前 3D 角色与怪物运行时 |
-| `src/game/` | 供正式 3D 运行时复用的维度无关玩法模块 |
-| `assets/art/` | 可替换美术资产及其源文件 |
+| `scenes/` | 可运行场景、UI 页面、场景装配入口 |
+| `src/framework/` | 跨系统稳定契约 |
+| `src/core/` | 全局基础设施、状态机、存储、音频、时间 |
+| `src/world3d/` | 3D 关卡、房间、门、撤离 |
+| `src/player3d/` / `src/enemy3d/` | 3D 角色与怪物运行时 |
+| `src/game/` | 维度无关的玩法模块（背包、掉落、结算、保险） |
+| `src/base/` | 基地长期数据、设施、商店、蓝图 |
+| `assets/art/` | 运行美术资产；制作源在 `art_source/` |
 | `assets/registry/` | 美术资产唯一登记源 |
-| `tests/verification/` | 自动回归场景 |
-| `docs/v0.1/` | 当前唯一有效开发文档 |
+| `_removed_content/` | 从原工程剥离、当前不用的内容（`.gdignore`，不入包） |
+| `tests/verification/` | 自动回归场景（多为原工程遗留，未逐条适配） |
+| `docs/` | 规范、空主设计、开发记录；`docs/archive/` 为历史 |
 
-`outputs/`、`.dev-cycle/` 和 `.codex-tmp/` 都是可丢弃工作产物，不进入版本控制。
+`outputs/`、`.dev-cycle/`、`.codex-tmp/` 是可丢弃工作产物，不进入版本控制。开发临时产物放上层 `ShellStorm2-work/`。
 
-开发临时产物放在上层 `ShellStorm2-work/`，历史制作源放在 `ShellStorm2-backup/`；见[管理与恢复记录](docs/v0.1/development/2026-10-11_workspace_slimming.md)。
-
-运行贴图遵循[尺寸与共享规则](docs/v0.1/design/runtime_texture_budget.md)：玩家最长边1024、怪物512、全部不超过1024；共享图在`assets/art/shared/textures/`。导出或重导入模型后运行`python scripts/check_runtime_texture_policy.py`，检查贴图超限、丢引用及内嵌图片回归。本次[优化记录](docs/v0.1/development/2026-10-11_runtime_texture_optimization.md)保留实际包体和验收证据。
+运行贴图遵循[尺寸与共享规则](docs/v0.1/10_资产与内容规范.md)，导出或重导入模型后运行 `python scripts/check_runtime_texture_policy.py`。

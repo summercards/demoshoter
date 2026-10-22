@@ -51,6 +51,24 @@ const FACILITY_BOXES := [
 const FACILITY_SCENE := preload("res://assets/art/props/base_world_3d/prp_base_facility_root_top3d.tscn")
 const GREYBOX_ROOM_SCRIPT := preload("res://scenes/greybox/greybox_room.gd")
 const LOADING_SCREEN_SCENE := "res://scenes/ExpeditionLoadingScreen.tscn"
+
+## ===== 刷怪开关（2026-10-22 主人要求）=====
+##
+## 只做「开关」这一件事，刷怪本身**一行都不重写**，全部走关卡里既有的那套
+## **运行时遭遇事件**（正式名；口头叫「倒计时刷怪」）：
+##
+##   room.encounter（下面 `_greybox_encounter()` 的数据）
+##     → Dungeon3D._build_room_encounter_config()   ← 现成构造器，固定
+##         completion=timer / progress_mode=tick / hud_countdown=true
+##     → Dungeon3D.start_encounter_event()          ← 唯一入口
+##
+## 之所以必须走构造器而不是自己拼 config：`progress_mode=tick` + `completion=timer`
+## 这两条正是「自己走 1 分钟倒计时、时间到就不再出怪」的定义，写死在构造器里。
+## 自己在灰盒里另拼一份就等于复制了一份平行实现，改一处漏一处。
+const SPAWN_SWITCH_DURATION_SEC := 60.0
+## 场景内可交互开关（带白圆点、走近按 E）。见 greybox_spawn_switch_3d.gd。
+const SPAWN_SWITCH_SCRIPT := preload("res://scenes/greybox/greybox_spawn_switch_3d.gd")
+var _spawn_switch: Area3D = null
 var _part_names: Array[String] = []
 var _atmosphere: TowerAtmosphere3D
 var _portal_fired := false
@@ -65,6 +83,7 @@ func _ready() -> void:
 	_install_world_time_hud()
 	_build_facilities()
 	_build_exit_portal()
+	_build_spawn_switch()
 	set_meta("greybox_level_id", level_id)
 	set_meta("greybox_generated", true)
 	set_meta("loading_scene_ready", true)
@@ -134,6 +153,15 @@ func _generate_layout() -> void:
 	room.prop_searched.connect(_on_prop_searched)
 	room.service_activated.connect(_on_service_activated)
 	room.light_toggled.connect(_on_room_light_toggled)
+	# 刷怪开关的数据源。键名全部是 Dungeon3D._build_room_encounter_config 已经在读的
+	# 正式键（触发器刷怪设计 §3.3），不新增任何机制键：
+	#   · duration_sec —— 这一轮刷怪持续多久（主人指定 1 分钟）
+	#   · stages       —— 每一波的怪物编成；at_sec 由构造器自动给，这里不写
+	#   · seal_room=false —— 主人要「只是刷怪」，不封门，其它什么都不变
+	#   · hunt_player  —— 让怪主动来找玩家；否则野外潜行逻辑下会有怪站着不动，
+	#                    点下去像「没刷出来」，那就不是刷怪开关了
+	#   · hud_countdown —— 右上角那枚倒计时环，是这套机制自带的表现，不是新加 UI
+	room.encounter = _greybox_encounter()
 	room.ensure_shell_built()
 	# No starter content collection: the inherited guaranteed pistol/ammo is retained.
 	_spawned_rooms["start"] = true
@@ -148,6 +176,49 @@ func _spawn_greybox_enemies() -> void:
 		var pos := _enemy_position(i, enemy_count)
 		positions.append(Vector3(pos.x, 0.1, pos.y))
 	_spawn_enemy_batch(room, configs, false, false, positions)
+
+
+## 开关点下去之后要刷的怪。只提供**编成**，不提供机制：
+## `completion` / `progress_mode` / `stage_advance` 的缺省值由
+## `Dungeon3D._build_room_encounter_config` 给出（timer / tick / clear），
+## 这里再写一遍就是复制平行实现。
+##
+## 波数多于「60 秒内能打完」的量是刻意的：这开关要的是「一分钟持续刷怪」，
+## 玩家杀得快就一直有下一波，杀得慢就到点收工（倒计时结束不再开工）。
+func _greybox_encounter() -> Dictionary:
+	return {
+		"duration_sec": SPAWN_SWITCH_DURATION_SEC,
+		"seal_room": false,
+		"hunt_player": true,
+		"hud_countdown": true,
+		"start_delay_sec": 1.0,
+		"stages": [
+			{"monsters": [{"type": "melee_chaser", "count": 4}]},
+			{"monsters": [{"type": "melee_chaser", "count": 5}]},
+			{"monsters": [{"type": "melee_chaser", "count": 5}]},
+			{"monsters": [{"type": "melee_chaser", "count": 6}]},
+			{"monsters": [{"type": "melee_chaser", "count": 6}]},
+			{"monsters": [{"type": "melee_chaser", "count": 7}]},
+		],
+	}
+
+
+## 刷怪开关本体。**场景里的可交互物件**（走过去按 E），不是 HUD 按钮 ——
+## 视觉与交互契约照抄 RoomLightSwitch3D，圆点由 PlayerInteractionController3D 统一画。
+## 摆位：玩家出生点 (0,0,20) 前方 2 m 的空地上，z=18 一带没有设施白盒。
+func _build_spawn_switch() -> void:
+	if DisplayServer.get_name() == "headless":
+		return
+	var room := _room_by_id.get("start") as DungeonRoom3D
+	if room == null:
+		return
+	var switch := SPAWN_SWITCH_SCRIPT.new() as Area3D
+	switch.name = "SpawnSwitch"
+	switch.set("host", self)
+	switch.set("room", room)
+	switch.position = Vector3(0.0, 0.0, 18.0)
+	add_child(switch)
+	_spawn_switch = switch
 
 func _build_facilities() -> void:
 	if not facility_boxes:
